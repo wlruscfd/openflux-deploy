@@ -1,0 +1,21 @@
+[Unit]
+Description=OpenFlux control plane
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=openflux
+Group=openflux
+EnvironmentFile=/etc/openflux/controlplane.env
+ExecStart=/opt/openflux/bin/controlplane
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/openflux
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
