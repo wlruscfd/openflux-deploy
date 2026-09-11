@@ -44,6 +44,15 @@ and the exact flags to hand to whoever runs that exit node:
 
 Re-running the script later redeploys a newer branch/tag of `openflux-server` in place.
 
+## Redeploys preserve your data
+
+Re-running install.sh on a server it's already set up (upgrading to a newer `openflux-server`, or
+just via the app's "Deploy again") keeps the existing database, admin token, and token pepper -
+every key, node, and ingest token you've already issued keeps working. Before touching anything, it
+also dumps the database to `/opt/openflux/backups/<timestamp>/openflux.sql` (plus a copy of the env
+file) as a just-in-case safety net. A first-time install has nothing to preserve or back up yet, so
+none of this applies to it.
+
 ## Non-interactive / automated use
 
 Every prompt is skipped if its variable is already set in the environment (`REPO_URL`, `GIT_REF`,

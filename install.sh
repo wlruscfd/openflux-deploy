@@ -28,6 +28,38 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "Run this as root (sudo bash install.sh)."
 command -v apt-get >/dev/null 2>&1 || die "This script only supports Debian/Ubuntu (apt-get) right now."
 
+# Reads VAR's value out of an already-written env file from a previous run,
+# if any - lets a redeploy fall back to what's already there instead of
+# generating a fresh value blind. Most critical for CONTROLPLANE_TOKEN_PEPPER
+# below: every key/node/ingest-token secret is stored hashed with it, so a
+# silently-regenerated pepper would make every one of them stop matching -
+# not lost data exactly, but unusable, which is just as bad.
+read_existing_env() {
+    local var="$1"
+    [ -f "$ENV_FILE" ] || return 0
+    grep "^$var=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true
+}
+
+# ---------------------------------------------------------------------------
+# $ENV_FILE only exists once a previous run has already gotten past the
+# Postgres setup step (see below) - so if it's here, this is a redeploy, and
+# there's an existing database worth protecting before touching anything.
+# Cheap insurance: skipped entirely on a genuinely first install, where
+# there's nothing yet to back up.
+if [ -f "$ENV_FILE" ]; then
+    BACKUP_DIR="/opt/openflux/backups/$(date +%Y%m%d-%H%M%S)"
+    log "Existing install detected - backing up to $BACKUP_DIR before redeploying"
+    mkdir -p "$BACKUP_DIR"
+    if command -v pg_dump >/dev/null 2>&1 &&
+        sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='openflux'" 2>/dev/null | grep -q 1; then
+        sudo -u postgres pg_dump openflux > "$BACKUP_DIR/openflux.sql" ||
+            warn "Database backup failed - continuing with the redeploy anyway."
+    else
+        warn "Postgres not found yet - nothing to back up despite $ENV_FILE existing."
+    fi
+    cp "$ENV_FILE" "$BACKUP_DIR/controlplane.env" 2>/dev/null || true
+fi
+
 ask() {
     # ask VAR "prompt" "default"
     # Skips the prompt entirely if VAR is already set in the environment -
@@ -79,12 +111,20 @@ else
 fi
 
 ask_secret ADMIN_TOKEN "Admin panel token"
+[ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(read_existing_env CONTROLPLANE_ADMIN_TOKEN)"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(openssl rand -hex 32)"
 
 ask_secret DB_PASSWORD "Postgres password for the openflux role"
 [ -n "$DB_PASSWORD" ] || DB_PASSWORD="$(openssl rand -hex 24)"
 
-TOKEN_PEPPER="$(openssl rand -hex 32)"
+# Unlike ADMIN_TOKEN/DB_PASSWORD there is no ask_secret prompt for this one -
+# it's an internal hashing salt, not something anyone should be typing in by
+# hand - so it must always come from the existing install if there is one.
+# Every key/node/ingest-token secret is stored hashed with it; regenerating
+# it on a redeploy would silently turn every previously issued one into a
+# permanent mismatch (see read_existing_env's comment above).
+TOKEN_PEPPER="$(read_existing_env CONTROLPLANE_TOKEN_PEPPER)"
+[ -n "$TOKEN_PEPPER" ] || TOKEN_PEPPER="$(openssl rand -hex 32)"
 
 ask REGISTER_NODE "Register a first exit node now? (y/n)" "y"
 if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
@@ -371,13 +411,25 @@ fi
 NODE_TOKEN=""
 NODE_ID=""
 if [ "${REGISTER_NODE:-n}" = "y" ] || [ "${REGISTER_NODE:-n}" = "Y" ]; then
-    log "Registering the first exit node"
-    NODE_JSON="$(curl -fsS -X POST "http://127.0.0.1:8080/v1/admin/nodes" \
-        -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
-        -d "{\"name\":\"$NODE_NAME\",\"max_keys\":$NODE_MAX_KEYS}")" || warn "Node registration failed - you can create one later from the admin panel."
-    if [ -n "${NODE_JSON:-}" ]; then
-        NODE_TOKEN="$(printf '%s' "$NODE_JSON" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)"
-        NODE_ID="$(printf '%s' "$NODE_JSON" | grep -o '"id":"[^"]*"' | cut -d'"' -f4)"
+    # REGISTER_NODE=y is the app's default on every deploy, including
+    # redeploys of an already-registered server - without this check, each
+    # one would register a brand new duplicate node (same name, new id),
+    # leaving the old one's token orphaned instead of touching anything.
+    EXISTING_NODES="$(curl -fsS "http://127.0.0.1:8080/v1/admin/nodes" \
+        -H "Authorization: Bearer $ADMIN_TOKEN")" || EXISTING_NODES=""
+    if printf '%s' "$EXISTING_NODES" | grep -qF "\"Name\":\"$NODE_NAME\""; then
+        log "Node \"$NODE_NAME\" is already registered - leaving it as is"
+        warn "Its token was only shown once, at creation. Use the admin panel's" \
+             "\"rotate token\" button if you've lost it."
+    else
+        log "Registering the first exit node"
+        NODE_JSON="$(curl -fsS -X POST "http://127.0.0.1:8080/v1/admin/nodes" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+            -d "{\"name\":\"$NODE_NAME\",\"max_keys\":$NODE_MAX_KEYS}")" || warn "Node registration failed - you can create one later from the admin panel."
+        if [ -n "${NODE_JSON:-}" ]; then
+            NODE_TOKEN="$(printf '%s' "$NODE_JSON" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)"
+            NODE_ID="$(printf '%s' "$NODE_JSON" | grep -o '"id":"[^"]*"' | cut -d'"' -f4)"
+        fi
     fi
 fi
 
