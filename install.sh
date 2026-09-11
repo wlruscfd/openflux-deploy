@@ -262,7 +262,14 @@ PrivateTmp=true
 WantedBy=multi-user.target
 SERVICE_TEMPLATE
 systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
+systemctl enable "$SERVICE_NAME"
+# Not "enable --now": on an already-running service (any redeploy),
+# `start` is a no-op - the process would keep running the old binary with
+# whatever env vars (admin token included) it started with, ignoring
+# everything this run just rebuilt/rewrote. `restart` is what actually
+# picks up a new binary or a changed $ENV_FILE either way, first install
+# or redeploy alike.
+systemctl restart "$SERVICE_NAME"
 
 log "Waiting for controlplane to come up"
 for _ in $(seq 1 20); do
