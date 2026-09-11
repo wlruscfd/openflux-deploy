@@ -67,7 +67,7 @@ This is exactly what the [openflux-app](https://github.com/wlruscfd/openflux-app
 - `openflux` system user, `/opt/openflux/{bin,server}`, `/etc/openflux/controlplane.env` (mode
   `600`, holds the DB URL / token pepper / admin token).
 - A local Postgres role + database.
-- `openflux-controlplane.service` (systemd; see `templates/`), enabled and started.
+- `openflux-controlplane.service` (systemd unit, embedded in install.sh), enabled and started.
 - Nginx reverse-proxying to `127.0.0.1:8080`, with TLS per the mode above.
 
 ## Honesty about the IP-certificate path

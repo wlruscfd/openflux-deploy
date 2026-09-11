@@ -68,7 +68,7 @@ bash install.sh
 - Системный пользователь `openflux`, `/opt/openflux/{bin,server}`, `/etc/openflux/controlplane.env`
   (права `600`, хранит DB URL / token pepper / admin token).
 - Локальная роль + база данных Postgres.
-- `openflux-controlplane.service` (systemd; см. `templates/`), включён и запущен.
+- `openflux-controlplane.service` (systemd-юнит, встроен в install.sh), включён и запущен.
 - Nginx с обратным прокси на `127.0.0.1:8080` и TLS согласно выбранному режиму.
 
 ## Честно про режим сертификата для IP

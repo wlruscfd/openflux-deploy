@@ -12,7 +12,6 @@
 # than doing the wrong thing silently.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GO_VERSION="1.26.5"
 INSTALL_ROOT="/opt/openflux"
 BIN_DIR="$INSTALL_ROOT/bin"
@@ -165,9 +164,34 @@ chown "$SYSTEM_USER:$SYSTEM_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 # ---------------------------------------------------------------------------
+# Templates below are inlined (not read from a sibling templates/ directory)
+# because both documented ways of running this script - curl -o install.sh
+# && bash install.sh, and the Android app's SSH deployer (see
+# server/deployssh) - fetch only this one file, not the repo it lives in.
 log "Installing the systemd service"
-sed "s#/opt/openflux#$INSTALL_ROOT#g" "$SCRIPT_DIR/templates/$SERVICE_NAME.service" \
-    > "/etc/systemd/system/$SERVICE_NAME.service"
+sed "s#/opt/openflux#$INSTALL_ROOT#g" <<'SERVICE_TEMPLATE' > "/etc/systemd/system/$SERVICE_NAME.service"
+[Unit]
+Description=OpenFlux control plane
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=openflux
+Group=openflux
+EnvironmentFile=/etc/openflux/controlplane.env
+ExecStart=/opt/openflux/bin/controlplane
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/openflux
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_TEMPLATE
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
 
@@ -180,8 +204,25 @@ curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 || die "controlplane d
 
 # ---------------------------------------------------------------------------
 log "Configuring Nginx"
-sed "s/__SERVER_NAME__/$SERVER_NAME/g" "$SCRIPT_DIR/templates/nginx-initial.conf.tmpl" \
-    > "/etc/nginx/sites-available/openflux"
+sed "s/__SERVER_NAME__/$SERVER_NAME/g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/sites-available/openflux"
+# Written by install.sh. HTTP-only reverse proxy in front of controlplane,
+# used as the starting point certbot's nginx plugin upgrades to HTTPS
+# (domain mode). Left in place as-is if the IP-certificate path falls back
+# to a self-signed cert instead - see the nginx-selfsigned template below.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __SERVER_NAME__;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+NGINX_INITIAL_TEMPLATE
 ln -sf /etc/nginx/sites-available/openflux /etc/nginx/sites-enabled/openflux
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
@@ -235,8 +276,37 @@ else
         -subj "/CN=$SERVER_NAME"
     sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" \
         -e "s#__CERT_PATH__#/etc/openflux/tls/selfsigned.crt#g" \
-        -e "s#__KEY_PATH__#/etc/openflux/tls/selfsigned.key#g" \
-        "$SCRIPT_DIR/templates/nginx-selfsigned.conf.tmpl" > /etc/nginx/sites-available/openflux
+        -e "s#__KEY_PATH__#/etc/openflux/tls/selfsigned.key#g" <<'NGINX_SELFSIGNED_TEMPLATE' > /etc/nginx/sites-available/openflux
+# Written by install.sh's fallback path: only used when automated
+# Let's Encrypt issuance for a bare IP address didn't succeed (see
+# obtain_tls above). Browsers will show a certificate warning for this -
+# the panel is still reachable over HTTPS, but you'll need to click
+# through the warning (or replace this with a real cert once you have a
+# domain, then re-run install.sh in domain mode).
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __SERVER_NAME__;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name __SERVER_NAME__;
+
+    ssl_certificate __CERT_PATH__;
+    ssl_certificate_key __KEY_PATH__;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+NGINX_SELFSIGNED_TEMPLATE
     nginx -t
     systemctl reload nginx
 fi
