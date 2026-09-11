@@ -281,3 +281,9 @@ NODESUMMARY
 fi
 
 echo "Re-run this script any time to redeploy a newer --git-ref of openflux-server."
+
+# One machine-readable line for automated callers (e.g. the app's SSH
+# deployer) to parse - see server/deployssh's resultLinePrefix. Harmless
+# to ignore if you're reading this as a human; everything in it is already
+# in the summary above.
+echo "OPENFLUX_DEPLOY_RESULT panel_url=$PANEL_URL admin_token=$ADMIN_TOKEN node_token=${NODE_TOKEN:-}"
