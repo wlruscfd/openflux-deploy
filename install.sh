@@ -93,10 +93,31 @@ if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-log "Installing packages (git, postgresql, nginx, certbot)"
+log "Installing packages (git, postgresql, nginx, snapd)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y git curl postgresql nginx certbot python3-certbot-nginx openssl
+apt-get install -y git curl postgresql nginx snapd openssl
+
+# ---------------------------------------------------------------------------
+# Debian/Ubuntu's apt-packaged certbot is years behind upstream (e.g. Ubuntu
+# 24.04 ships 2.9.0) and doesn't know about IP-address certificates at all
+# (--ip-address landed in certbot 5.3) - it rejects a bare IP outright
+# ("will not issue certificates for a bare IP address") before ever asking
+# Let's Encrypt. certbot's own snap is the officially recommended way to
+# stay current, so that's what obtain_tls below relies on. If snap isn't
+# usable on this host, this is deliberately non-fatal: obtain_tls will just
+# fail to find certbot and the existing self-signed fallback takes over.
+log "Installing certbot via snap"
+if command -v snap >/dev/null 2>&1 &&
+    snap wait system seed.loaded 2>/dev/null &&
+    { snap install core >/dev/null 2>&1 || true; } &&
+    { snap refresh core >/dev/null 2>&1 || true; } &&
+    snap install --classic certbot; then
+    ln -sf /snap/bin/certbot /usr/bin/certbot
+else
+    warn "Could not install certbot via snap (snap may not be usable on this host)."
+    warn "TLS certificate issuance below will fail and fall back to a self-signed certificate."
+fi
 
 # ---------------------------------------------------------------------------
 log "Installing Go $GO_VERSION (apt's Go is usually too old for this project)"
@@ -211,15 +232,22 @@ curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 || die "controlplane d
 
 # ---------------------------------------------------------------------------
 log "Configuring Nginx"
+mkdir -p /var/www/certbot
 sed "s/__SERVER_NAME__/$SERVER_NAME/g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/sites-available/openflux"
 # Written by install.sh. HTTP-only reverse proxy in front of controlplane,
-# used as the starting point certbot's nginx plugin upgrades to HTTPS
-# (domain mode). Left in place as-is if the IP-certificate path falls back
-# to a self-signed cert instead - see the nginx-selfsigned template below.
+# also serving Let's Encrypt's HTTP-01 challenge from /var/www/certbot -
+# obtain_tls below needs that reachable before it runs. Domain mode's
+# certbot --nginx plugin rewrites this into an HTTPS block itself; IP mode
+# (and the self-signed fallback) get a hand-written one - see obtain_tls
+# and write_https_nginx_config.
 server {
     listen 80;
     listen [::]:80;
     server_name __SERVER_NAME__;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -236,65 +264,29 @@ nginx -t
 systemctl reload nginx
 
 # ---------------------------------------------------------------------------
-# Requests a certificate for $SERVER_NAME and points Nginx at it. Domain mode
-# is the well-trodden path (certbot's own nginx plugin, standard HTTP-01).
-# IP mode uses Let's Encrypt's newer short-lived-certificate-for-IP-address
-# capability; the exact certbot invocation for that is less battle-tested
-# from this script's vantage point than the domain path, so on any failure
-# it falls back to a self-signed certificate instead of leaving the panel on
-# plain HTTP or aborting the whole install.
-obtain_tls() {
-    if [ "$TLS_MODE" = "domain" ]; then
-        certbot --nginx --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_NAME" --redirect
-        return $?
-    fi
-
-    log "Attempting Let's Encrypt short-lived certificate for IP $SERVER_NAME"
-    if certbot certonly --nginx --non-interactive --agree-tos -m "${LE_EMAIL:-admin@$SERVER_NAME.invalid}" \
-        --preferred-profile shortlived -d "$SERVER_NAME"; then
-        certbot install --nginx --cert-name "$SERVER_NAME" --non-interactive
-        return 0
-    fi
-    return 1
-}
-
-log "Requesting a TLS certificate ($TLS_MODE mode)"
-if obtain_tls; then
-    log "TLS certificate installed via Let's Encrypt"
-    if [ "$TLS_MODE" = "ip" ]; then
-        warn "This is a short-lived (~6 day) IP certificate. certbot's own renewal timer" \
-             "(certbot.timer, already enabled by the certbot package) renews it automatically" \
-             "on its regular twice-daily check, since it always has under 30 days left."
-    fi
-else
-    warn "Automated Let's Encrypt issuance for $SERVER_NAME failed."
-    warn "Falling back to a self-signed certificate so the panel is still reachable over HTTPS."
-    warn "Browsers will show a certificate warning until you either retry with a working" \
-         "domain, or replace the cert at /etc/openflux/tls yourself."
-    mkdir -p /etc/openflux/tls
-    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
-        -keyout /etc/openflux/tls/selfsigned.key \
-        -out /etc/openflux/tls/selfsigned.crt \
-        -subj "/CN=$SERVER_NAME" \
-        -addext "subjectAltName=IP:$SERVER_NAME" 2>/dev/null || \
-    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
-        -keyout /etc/openflux/tls/selfsigned.key \
-        -out /etc/openflux/tls/selfsigned.crt \
-        -subj "/CN=$SERVER_NAME"
+# Writes the HTTPS vhost for an already-obtained cert/key pair and reloads
+# Nginx. Used for IP-mode certificates and the self-signed fallback - NOT
+# for domain mode, where certbot's own --nginx plugin edits Nginx itself
+# (mature, auto-installs and renews on its own; see obtain_tls). The
+# acme-challenge location is kept even after moving to HTTPS so a future
+# webroot-based renewal (IP mode) keeps working without editing this again.
+write_https_nginx_config() {
+    local cert="$1" key="$2"
     sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" \
-        -e "s#__CERT_PATH__#/etc/openflux/tls/selfsigned.crt#g" \
-        -e "s#__KEY_PATH__#/etc/openflux/tls/selfsigned.key#g" <<'NGINX_SELFSIGNED_TEMPLATE' > /etc/nginx/sites-available/openflux
-# Written by install.sh's fallback path: only used when automated
-# Let's Encrypt issuance for a bare IP address didn't succeed (see
-# obtain_tls above). Browsers will show a certificate warning for this -
-# the panel is still reachable over HTTPS, but you'll need to click
-# through the warning (or replace this with a real cert once you have a
-# domain, then re-run install.sh in domain mode).
+        -e "s#__CERT_PATH__#$cert#g" \
+        -e "s#__KEY_PATH__#$key#g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/sites-available/openflux
 server {
     listen 80;
     listen [::]:80;
     server_name __SERVER_NAME__;
-    return 301 https://$host$request_uri;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {
@@ -313,9 +305,58 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-NGINX_SELFSIGNED_TEMPLATE
+NGINX_HTTPS_TEMPLATE
     nginx -t
     systemctl reload nginx
+}
+
+# Requests a certificate for $SERVER_NAME. Domain mode uses certbot's own
+# nginx plugin (mature, auto-edits/reloads Nginx and renews itself). IP mode
+# uses Let's Encrypt's newer short-lived-certificate-for-IP-address
+# capability, which as of certbot 5.x only supports the webroot plugin and
+# doesn't auto-install into a web server yet - write_https_nginx_config
+# does that part by hand. On any failure this falls back to a self-signed
+# certificate instead of leaving the panel on plain HTTP or aborting.
+obtain_tls() {
+    if [ "$TLS_MODE" = "domain" ]; then
+        certbot --nginx --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_NAME" --redirect
+        return $?
+    fi
+
+    log "Attempting Let's Encrypt short-lived certificate for IP $SERVER_NAME"
+    if certbot certonly --webroot --webroot-path /var/www/certbot --non-interactive --agree-tos \
+        -m "${LE_EMAIL:-admin@$SERVER_NAME.invalid}" \
+        --preferred-profile shortlived --ip-address "$SERVER_NAME"; then
+        write_https_nginx_config "/etc/letsencrypt/live/$SERVER_NAME/fullchain.pem" \
+            "/etc/letsencrypt/live/$SERVER_NAME/privkey.pem"
+        return 0
+    fi
+    return 1
+}
+
+log "Requesting a TLS certificate ($TLS_MODE mode)"
+if obtain_tls; then
+    log "TLS certificate installed via Let's Encrypt"
+    if [ "$TLS_MODE" = "ip" ]; then
+        warn "This is a short-lived (~6 day) IP certificate. certbot's own automatic renewal" \
+             "(enabled by its snap package) renews it well before expiry on its regular check."
+    fi
+else
+    warn "Automated Let's Encrypt issuance for $SERVER_NAME failed."
+    warn "Falling back to a self-signed certificate so the panel is still reachable over HTTPS."
+    warn "Browsers will show a certificate warning until you either retry with a working" \
+         "domain, or replace the cert at /etc/openflux/tls yourself."
+    mkdir -p /etc/openflux/tls
+    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
+        -keyout /etc/openflux/tls/selfsigned.key \
+        -out /etc/openflux/tls/selfsigned.crt \
+        -subj "/CN=$SERVER_NAME" \
+        -addext "subjectAltName=IP:$SERVER_NAME" 2>/dev/null || \
+    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
+        -keyout /etc/openflux/tls/selfsigned.key \
+        -out /etc/openflux/tls/selfsigned.crt \
+        -subj "/CN=$SERVER_NAME"
+    write_https_nginx_config /etc/openflux/tls/selfsigned.crt /etc/openflux/tls/selfsigned.key
 fi
 
 # ---------------------------------------------------------------------------

@@ -73,7 +73,10 @@ This is exactly what the [openflux-app](https://github.com/wlruscfd/openflux-app
 ## Honesty about the IP-certificate path
 
 Let's Encrypt's short-lived certificates for bare IP addresses are newer and less battle-tested
-than the domain path. This script's exact `certbot` invocation for it is a best effort, not a
-guarantee - if it doesn't match your certbot version's exact flags, the script notices the failure
-and falls back to a self-signed certificate rather than leaving the install half-finished. If you
-can get a domain pointed at the server instead, that path is the well-trodden one.
+than the domain path, and need a recent certbot (`--ip-address` needs 5.3+, webroot support for it
+needs 5.4+) - Debian/Ubuntu's own apt package is normally far older than that and doesn't support
+IP certificates at all, so this script installs certbot via snap specifically to get a current
+enough one. That said, this is still a newer Let's Encrypt capability with its own moving parts;
+if issuance still fails for you, the script notices and falls back to a self-signed certificate
+rather than leaving the install half-finished. If you can get a domain pointed at the server
+instead, that path is the well-trodden one.
