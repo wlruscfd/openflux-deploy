@@ -118,6 +118,13 @@ export PATH="/usr/local/go/bin:$PATH"
 
 # ---------------------------------------------------------------------------
 log "Fetching openflux-server ($GIT_REF)"
+# Every run after the first sees $SRC_DIR owned by $SYSTEM_USER (the chown
+# below applies to the whole $INSTALL_ROOT, .git included), while this
+# script always runs as root - without this, git's dubious-ownership check
+# refuses to touch a repo it doesn't own, breaking every redeploy after the
+# first with "detected dubious ownership in repository".
+git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$SRC_DIR" ||
+    git config --global --add safe.directory "$SRC_DIR"
 if [ -d "$SRC_DIR/.git" ]; then
     git -C "$SRC_DIR" fetch --depth 1 origin "$GIT_REF"
     git -C "$SRC_DIR" checkout "$GIT_REF"
