@@ -44,6 +44,24 @@ and the exact flags to hand to whoever runs that exit node:
 
 Re-running the script later redeploys a newer branch/tag of `openflux-server` in place.
 
+## Non-interactive / automated use
+
+Every prompt is skipped if its variable is already set in the environment (`REPO_URL`, `GIT_REF`,
+`TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `ADMIN_TOKEN`, `DB_PASSWORD`, `REGISTER_NODE`,
+`NODE_NAME`, `NODE_MAX_KEYS` - the exact names used inside the script), so it can be driven without
+a human at the keyboard:
+
+```bash
+REPO_URL=https://github.com/wlruscfd/openflux-server.git GIT_REF=main \
+TLS_MODE=domain DOMAIN=panel.example.com LE_EMAIL=you@example.com \
+ADMIN_TOKEN="$(openssl rand -hex 32)" DB_PASSWORD="$(openssl rand -hex 24)" \
+REGISTER_NODE=y NODE_NAME=node-1 NODE_MAX_KEYS=500 \
+bash install.sh
+```
+
+This is exactly what the [openflux-app](https://github.com/wlruscfd/openflux-app) Android app's
+**Deploy** tab does over SSH, so you never see a prompt when deploying from the app.
+
 ## What it sets up
 
 - `openflux` system user, `/opt/openflux/{bin,server}`, `/etc/openflux/controlplane.env` (mode

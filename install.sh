@@ -31,7 +31,14 @@ command -v apt-get >/dev/null 2>&1 || die "This script only supports Debian/Ubun
 
 ask() {
     # ask VAR "prompt" "default"
+    # Skips the prompt entirely if VAR is already set in the environment -
+    # this is what lets a caller (e.g. the Android app's SSH deployer)
+    # drive this script non-interactively by pre-exporting every variable
+    # it asks about, with zero changes to the interactive experience below.
     local __var="$1" __prompt="$2" __default="${3:-}" __reply
+    if [ -n "${!__var:-}" ]; then
+        return
+    fi
     if [ -n "$__default" ]; then
         read -r -p "$__prompt [$__default]: " __reply || true
         __reply="${__reply:-$__default}"
@@ -43,6 +50,9 @@ ask() {
 
 ask_secret() {
     local __var="$1" __prompt="$2" __reply
+    if [ -n "${!__var:-}" ]; then
+        return
+    fi
     read -r -s -p "$__prompt (leave blank to auto-generate): " __reply || true
     echo
     printf -v "$__var" '%s' "$__reply"

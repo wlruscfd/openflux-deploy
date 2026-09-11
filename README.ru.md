@@ -44,6 +44,25 @@ sudo bash install.sh
 Повторный запуск скрипта позже разворачивает более новую ветку/тег `openflux-server` поверх
 текущей установки.
 
+## Неинтерактивный / автоматический запуск
+
+Любой вопрос пропускается, если соответствующая переменная уже задана в окружении (`REPO_URL`,
+`GIT_REF`, `TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `ADMIN_TOKEN`, `DB_PASSWORD`,
+`REGISTER_NODE`, `NODE_NAME`, `NODE_MAX_KEYS` — именно эти имена используются внутри скрипта),
+поэтому его можно запускать без человека за клавиатурой:
+
+```bash
+REPO_URL=https://github.com/wlruscfd/openflux-server.git GIT_REF=main \
+TLS_MODE=domain DOMAIN=panel.example.com LE_EMAIL=you@example.com \
+ADMIN_TOKEN="$(openssl rand -hex 32)" DB_PASSWORD="$(openssl rand -hex 24)" \
+REGISTER_NODE=y NODE_NAME=node-1 NODE_MAX_KEYS=500 \
+bash install.sh
+```
+
+Именно так вкладка **Деплой** Android-приложения
+[openflux-app](https://github.com/wlruscfd/openflux-app) запускает этот скрипт по SSH — вопросов
+при этом не возникает вообще.
+
 ## Что настраивается
 
 - Системный пользователь `openflux`, `/opt/openflux/{bin,server}`, `/etc/openflux/controlplane.env`
