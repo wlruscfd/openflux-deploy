@@ -65,7 +65,7 @@ echo "Answer the questions below; press Enter to accept the default in [brackets
 ask REPO_URL "openflux-server repo URL" "$DEFAULT_REPO_URL"
 ask GIT_REF "Git branch/tag to deploy" "main"
 
-ask TLS_MODE "TLS mode - 'domain' or 'ip'" "domain"
+ask TLS_MODE "TLS mode - 'domain' or 'ip'" "ip"
 if [ "$TLS_MODE" = "domain" ]; then
     ask DOMAIN "Domain name pointing at this server's IP" ""
     [ -n "$DOMAIN" ] || die "A domain is required in domain mode."
