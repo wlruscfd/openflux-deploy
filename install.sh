@@ -324,8 +324,15 @@ obtain_tls() {
     fi
 
     log "Attempting Let's Encrypt short-lived certificate for IP $SERVER_NAME"
+    # IP mode never prompts for an email (see ask() above), but the ACME
+    # server still validates whatever address it's given - a made-up
+    # address under the reserved .invalid TLD (RFC 2606) used to be passed
+    # here and was rejected outright ("believes ... is an invalid email
+    # address"). Falls back to a random mailbox on a real, resolvable
+    # domain instead when the caller didn't supply LE_EMAIL.
+    local ip_mode_email="${LE_EMAIL:-$(openssl rand -hex 6)@helloo.lol}"
     if certbot certonly --webroot --webroot-path /var/www/certbot --non-interactive --agree-tos \
-        -m "${LE_EMAIL:-admin@$SERVER_NAME.invalid}" \
+        -m "$ip_mode_email" \
         --preferred-profile shortlived --ip-address "$SERVER_NAME"; then
         write_https_nginx_config "/etc/letsencrypt/live/$SERVER_NAME/fullchain.pem" \
             "/etc/letsencrypt/live/$SERVER_NAME/privkey.pem"
