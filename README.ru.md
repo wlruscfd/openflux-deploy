@@ -30,6 +30,11 @@ sudo bash install.sh
   была доступна по HTTPS).
 - Токен администратора (или нажмите Enter, чтобы сгенерировать) — именно его вы вставите потом в
   панель управления по адресу `https://<ваш-домен-или-ip>/admin/`.
+- Ставить ли полноценную **SvelteKit-панель** (нужен Bun; по умолчанию да): она отдаёт дашборд по
+  адресу `/admin/` за Nginx, рядом с `/v1/*` от controlplane. Если ответить «n», останется исходная
+  самодостаточная панель, встроенная прямо в бинарник controlplane (тоже по адресу `/admin/`).
+  «y» здесь *никогда* не ломает установку — если Bun не поставится или панель не соберётся, скрипт
+  сам откатится на встроенную панель и сообщит об этом.
 - Регистрировать ли первую exit-ноду сразу.
 
 В конце скрипт выведет URL панели, токен администратора (**сохраните его — он хранится на сервере
@@ -58,28 +63,34 @@ sudo bash install.sh
 
 Любой вопрос пропускается, если соответствующая переменная уже задана в окружении (`REPO_URL`,
 `GIT_REF`, `TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `ADMIN_TOKEN`, `DB_PASSWORD`,
-`REGISTER_NODE`, `NODE_NAME`, `NODE_MAX_KEYS` — именно эти имена используются внутри скрипта),
-поэтому его можно запускать без человека за клавиатурой:
+`REGISTER_NODE`, `NODE_NAME`, `NODE_MAX_KEYS`, `WEB_PANEL` — именно эти имена используются внутри
+скрипта), поэтому его можно запускать без человека за клавиатурой:
 
 ```bash
 REPO_URL=https://github.com/wlruscfd/openflux-server.git GIT_REF=main \
 TLS_MODE=domain DOMAIN=panel.example.com LE_EMAIL=you@example.com \
 ADMIN_TOKEN="$(openssl rand -hex 32)" DB_PASSWORD="$(openssl rand -hex 24)" \
-REGISTER_NODE=y NODE_NAME=node-1 NODE_MAX_KEYS=500 \
+REGISTER_NODE=y NODE_NAME=node-1 NODE_MAX_KEYS=500 WEB_PANEL=y \
 bash install.sh
 ```
 
 Именно так вкладка **Деплой** Android-приложения
 [openflux-app](https://github.com/wlruscfd/openflux-app) запускает этот скрипт по SSH — вопросов
-при этом не возникает вообще.
+при этом не возникает вообще. Неинтерактивные вызовы без предзаданного `WEB_PANEL` получают
+встроенную панель — скрипт не задаёт вопросов там, где stdin не интерактивен.
 
 ## Что настраивается
 
-- Системный пользователь `openflux`, `/opt/openflux/{bin,server}`, `/etc/openflux/controlplane.env`
-  (права `600`, хранит DB URL / token pepper / admin token).
+- Системный пользователь `openflux`, `/opt/openflux/{bin,server,web}`,
+  `/etc/openflux/controlplane.env` (права `600`, хранит DB URL / token pepper / admin token).
 - Локальная роль + база данных Postgres.
 - `openflux-controlplane.service` (systemd-юнит, встроен в install.sh), включён и запущен.
-- Nginx с обратным прокси на `127.0.0.1:8080` и TLS согласно выбранному режиму.
+- С веб-панелью: Bun в `/opt/openflux/bun`, собранное SvelteKit-приложение в `/opt/openflux/web`
+  и `openflux-web.service` (`bun server.js` на `127.0.0.1:3000`, а `CONTROLPLANE_UPSTREAM` хранит
+  адрес controlplane, на который проксируются `/v1/*`).
+- Nginx: `/admin/` → веб-панель (или встроенная панель controlplane, если Bun пропустили),
+  `/v1/` + `/healthz` → controlplane на `127.0.0.1:8080`, всё поверх TLS согласно выбранному
+  режиму. В `http`-режиме без веб-панели разбиение не применяется — controlplane отвечает напрямую.
 
 ## Честно про режим сертификата для IP
 
