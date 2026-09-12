@@ -550,7 +550,7 @@ Wants=openflux-controlplane.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/openflux/nodeagent.env
-ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN} --debug
+ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN}
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
