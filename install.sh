@@ -6,10 +6,13 @@
 #   sudo bash install.sh
 #
 # It asks a handful of questions, then installs Postgres, Nginx, Go, builds
-# and runs controlplane (see ../server/controlplane), and puts the admin
-# panel behind HTTPS. Debian/Ubuntu only for this pass (anything with
-# apt-get) - it exits early with a clear message on anything else rather
-# than doing the wrong thing silently.
+# and runs controlplane (see ../server/controlplane), registers and - by
+# default - also runs a first exit node right here on this same server (see
+# ../main.go and RUN_NODE_HERE below; say "n" if you're pointing it at a
+# node running elsewhere instead), and puts the admin panel behind HTTPS.
+# Debian/Ubuntu only for this pass (anything with apt-get) - it exits early
+# with a clear message on anything else rather than doing the wrong thing
+# silently.
 set -euo pipefail
 
 GO_VERSION="1.26.5"
@@ -17,7 +20,9 @@ INSTALL_ROOT="/opt/openflux"
 BIN_DIR="$INSTALL_ROOT/bin"
 SRC_DIR="$INSTALL_ROOT/server"
 ENV_FILE="/etc/openflux/controlplane.env"
+NODEAGENT_ENV_FILE="/etc/openflux/nodeagent.env"
 SERVICE_NAME="openflux-controlplane"
+NODEAGENT_SERVICE_NAME="openflux-nodeagent"
 SYSTEM_USER="openflux"
 DEFAULT_REPO_URL="https://github.com/wlruscfd/openflux-server.git"
 
@@ -33,11 +38,14 @@ command -v apt-get >/dev/null 2>&1 || die "This script only supports Debian/Ubun
 # generating a fresh value blind. Most critical for CONTROLPLANE_TOKEN_PEPPER
 # below: every key/node/ingest-token secret is stored hashed with it, so a
 # silently-regenerated pepper would make every one of them stop matching -
-# not lost data exactly, but unusable, which is just as bad.
+# not lost data exactly, but unusable, which is just as bad. Also how a
+# redeploy recovers NODEAGENT_TOKEN (see $NODEAGENT_ENV_FILE below) - a node
+# token is exactly as one-way-hashed as any other, so once the node already
+# exists there is no fresh one to be had, only this saved copy.
 read_existing_env() {
-    local var="$1"
-    [ -f "$ENV_FILE" ] || return 0
-    grep "^$var=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true
+    local var="$1" file="${2:-$ENV_FILE}"
+    [ -f "$file" ] || return 0
+    grep "^$var=" "$file" 2>/dev/null | tail -n1 | cut -d= -f2- || true
 }
 
 # ---------------------------------------------------------------------------
@@ -130,6 +138,7 @@ ask REGISTER_NODE "Register a first exit node now? (y/n)" "y"
 if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
     ask NODE_NAME "First node's name" "node-1"
     ask NODE_MAX_KEYS "First node's max keys" "500"
+    ask RUN_NODE_HERE "Also run this exit node on this same server? (y/n)" "y"
 fi
 
 # ---------------------------------------------------------------------------
@@ -198,6 +207,11 @@ fi
 log "Building controlplane"
 mkdir -p "$BIN_DIR"
 ( cd "$SRC_DIR/controlplane" && go build -o "$BIN_DIR/controlplane" ./cmd/controlplane )
+
+if [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; then
+    log "Building the exit-node binary"
+    ( cd "$SRC_DIR" && go build -o "$BIN_DIR/universal-bypass-tool" . )
+fi
 
 # ---------------------------------------------------------------------------
 log "Setting up the openflux system user"
@@ -415,7 +429,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-NODE_TOKEN=""
+# A caller can hand NODE_TOKEN in directly (matching every other
+# ask()-skippable variable in this script) to recover a node whose token
+# neither the API nor $NODEAGENT_ENV_FILE can produce anymore - see the
+# warn() below.
+NODE_TOKEN="${NODE_TOKEN:-}"
 NODE_ID=""
 if [ "${REGISTER_NODE:-n}" = "y" ] || [ "${REGISTER_NODE:-n}" = "Y" ]; then
     # REGISTER_NODE=y is the app's default on every deploy, including
@@ -426,8 +444,21 @@ if [ "${REGISTER_NODE:-n}" = "y" ] || [ "${REGISTER_NODE:-n}" = "Y" ]; then
         -H "Authorization: Bearer $ADMIN_TOKEN")" || EXISTING_NODES=""
     if printf '%s' "$EXISTING_NODES" | grep -qF "\"Name\":\"$NODE_NAME\""; then
         log "Node \"$NODE_NAME\" is already registered - leaving it as is"
-        warn "Its token was only shown once, at creation. Use the admin panel's" \
-             "\"rotate token\" button if you've lost it."
+        # A redeploy can't get a fresh token for a node that already exists
+        # (one-way hashed, same as any other) - the only way this run's
+        # locally-run node keeps working is reusing what a previous run
+        # already saved, or one the caller hands in directly (matching every
+        # other ask()-skippable variable in this script). If neither is
+        # available (e.g. the node was created by hand, or RUN_NODE_HERE was
+        # "n" before), there is genuinely nothing to recover here short of
+        # rotating.
+        NODE_TOKEN="${NODE_TOKEN:-$(read_existing_env NODEAGENT_TOKEN "$NODEAGENT_ENV_FILE")}"
+        NODE_ID="$(printf '%s' "$EXISTING_NODES" | grep -o "\"ID\":\"[^\"]*\",\"Name\":\"$NODE_NAME\"" | grep -o '"ID":"[^"]*"' | cut -d'"' -f4 | head -n1)"
+        if [ -z "$NODE_TOKEN" ]; then
+            warn "Its token was only shown once, at creation, and isn't saved on this" \
+                 "server either - use the admin panel's \"rotate token\" button, then" \
+                 "re-run with NODE_TOKEN=<that token> bash install.sh"
+        fi
     else
         log "Registering the first exit node"
         NODE_JSON="$(curl -fsS -X POST "http://127.0.0.1:8080/v1/admin/nodes" \
@@ -437,6 +468,59 @@ if [ "${REGISTER_NODE:-n}" = "y" ] || [ "${REGISTER_NODE:-n}" = "Y" ]; then
             NODE_TOKEN="$(printf '%s' "$NODE_JSON" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)"
             NODE_ID="$(printf '%s' "$NODE_JSON" | grep -o '"id":"[^"]*"' | cut -d'"' -f4)"
         fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+NODE_RUNNING_HERE="n"
+if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ -n "$NODE_TOKEN" ]; then
+    log "Setting up the exit node on this server"
+
+    # The exit node relays real TCP/IP packets through a raw socket instead
+    # of the kernel's own TCP stack, so the kernel - which knows nothing
+    # about these connections - would otherwise see their unexpected
+    # inbound packets and RST them itself. -C first so a redeploy doesn't
+    # pile up a duplicate copy of this rule every time.
+    iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP 2>/dev/null || \
+        iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+
+    mkdir -p "$(dirname "$NODEAGENT_ENV_FILE")"
+    cat > "$NODEAGENT_ENV_FILE" <<EOF
+NODEAGENT_CONTROL_URL=http://127.0.0.1:8080
+NODEAGENT_TOKEN=$NODE_TOKEN
+EOF
+    chmod 600 "$NODEAGENT_ENV_FILE"
+
+    sed "s#/opt/openflux#$INSTALL_ROOT#g" <<'NODEAGENT_SERVICE_TEMPLATE' > "/etc/systemd/system/$NODEAGENT_SERVICE_NAME.service"
+[Unit]
+Description=OpenFlux exit node
+After=network.target openflux-controlplane.service
+Wants=openflux-controlplane.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/openflux/nodeagent.env
+ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN}
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+NODEAGENT_SERVICE_TEMPLATE
+    systemctl daemon-reload
+    systemctl enable "$NODEAGENT_SERVICE_NAME"
+    # restart, not enable --now - see the identical comment on the
+    # controlplane service above; the exact same stale-process trap applies
+    # here on every redeploy.
+    systemctl restart "$NODEAGENT_SERVICE_NAME"
+
+    sleep 2
+    if systemctl is-active --quiet "$NODEAGENT_SERVICE_NAME"; then
+        NODE_RUNNING_HERE="y"
+    else
+        warn "The exit-node service didn't stay up - check:" \
+             "journalctl -u $NODEAGENT_SERVICE_NAME -n 50 --no-pager"
     fi
 fi
 
@@ -457,12 +541,20 @@ cat <<NODESUMMARY
   First node ID:     $NODE_ID
   First node token:  $NODE_TOKEN
 
+NODESUMMARY
+    if [ "$NODE_RUNNING_HERE" = "y" ]; then
+        echo "  Exit node: running on this server as $NODEAGENT_SERVICE_NAME."
+        echo "  Check on it any time with: systemctl status $NODEAGENT_SERVICE_NAME"
+        echo
+    else
+cat <<NODESUMMARY
   On the exit-node machine:
     ./universal-bypass-tool --exit-node --managed \\
         --control-url "https://$SERVER_NAME" \\
         --node-token "$NODE_TOKEN"
 
 NODESUMMARY
+    fi
 fi
 
 echo "Re-run this script any time to redeploy a newer --git-ref of openflux-server."
