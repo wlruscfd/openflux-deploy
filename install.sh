@@ -442,6 +442,11 @@ log "Configuring Nginx"
 if [ "$OS_FAMILY" = "rhel" ] && command -v setsebool >/dev/null 2>&1; then
     setsebool -P httpd_can_network_connect 1 2>/dev/null || true
 fi
+# Debian/Ubuntu's nginx package starts and enables its own service on
+# install; Astra Linux's apparently doesn't ("nginx.service is not active,
+# cannot reload" further down otherwise) - enable --now is a safe no-op if
+# it's already running either way.
+systemctl enable --now nginx
 mkdir -p /var/www/certbot /etc/nginx/conf.d
 # conf.d/*.conf, not sites-available+sites-enabled: the latter is a
 # Debian/Ubuntu packaging convention that not every Debian derivative
