@@ -6,7 +6,7 @@ A fork of [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux
 `install.sh`: a script that asks a handful of questions and rolls out
 [openflux-server](https://github.com/wlruscfd/openflux-server)'s `controlplane` — Postgres, the
 systemd service, Nginx, and an HTTPS certificate (Let's Encrypt) with auto-renewal — on a fresh
-Debian/Ubuntu VPS.
+Debian/Ubuntu or AlmaLinux/RHEL-family VPS.
 
 ## Usage
 
@@ -83,8 +83,8 @@ This is exactly what the [openflux-app](https://github.com/wlruscfd/openflux-app
 
 Let's Encrypt's short-lived certificates for bare IP addresses are newer and less battle-tested
 than the domain path, and need a recent certbot (`--ip-address` needs 5.3+, webroot support for it
-needs 5.4+) - Debian/Ubuntu's own apt package is normally far older than that and doesn't support
-IP certificates at all, so this script installs certbot via snap specifically to get a current
+needs 5.4+) - the certbot package in Debian/Ubuntu's apt or AlmaLinux's EPEL is normally far older
+than that and doesn't support IP certificates at all, so this script installs certbot via snap specifically to get a current
 enough one. That said, this is still a newer Let's Encrypt capability with its own moving parts;
 if issuance still fails for you, the script notices and falls back to a self-signed certificate
 rather than leaving the install half-finished. If you can get a domain pointed at the server

@@ -10,7 +10,7 @@
 # default - also runs a first exit node right here on this same server (see
 # ../main.go and RUN_NODE_HERE below; say "n" if you're pointing it at a
 # node running elsewhere instead), and puts the admin panel behind HTTPS.
-# Debian/Ubuntu only for this pass (anything with apt-get) - it exits early
+# Debian/Ubuntu (apt-get) and AlmaLinux/RHEL-family (dnf) - it exits early
 # with a clear message on anything else rather than doing the wrong thing
 # silently.
 set -euo pipefail
@@ -31,7 +31,17 @@ warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "Run this as root (sudo bash install.sh)."
-command -v apt-get >/dev/null 2>&1 || die "This script only supports Debian/Ubuntu (apt-get) right now."
+
+# OS_FAMILY drives every package-manager-specific step below (package names,
+# Postgres init, firewall, SELinux) - detected once here rather than
+# re-checking `command -v` at each call site.
+if command -v apt-get >/dev/null 2>&1; then
+    OS_FAMILY="debian"
+elif command -v dnf >/dev/null 2>&1; then
+    OS_FAMILY="rhel"
+else
+    die "This script only supports Debian/Ubuntu (apt-get) or AlmaLinux/RHEL-family (dnf) right now."
+fi
 
 # Reads VAR's value out of an already-written env file from a previous run,
 # if any - lets a redeploy fall back to what's already there instead of
@@ -136,6 +146,21 @@ else
     SERVER_NAME="$SERVER_IP"
 fi
 
+# AlmaLinux/RHEL-family ships firewalld active by default, allowing nothing
+# but SSH in - unlike Debian/Ubuntu, which has no firewall active out of the
+# box, so nothing was needed here for that family. Without this, the VPS/
+# cloud firewall notice above would be satisfied but the host's own firewall
+# would still silently drop everything.
+if [ "$OS_FAMILY" = "rhel" ] && command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+    log "Opening the needed port(s) in firewalld"
+    if [ "$TLS_MODE" = "http" ]; then
+        firewall-cmd --permanent --add-port=8080/tcp
+    else
+        firewall-cmd --permanent --add-service=http --add-service=https
+    fi
+    firewall-cmd --reload
+fi
+
 ask_secret ADMIN_TOKEN "Admin panel token"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(read_existing_env CONTROLPLANE_ADMIN_TOKEN)"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(openssl rand -hex 32)"
@@ -165,25 +190,47 @@ fi
 # proxy or certificate to install in the first place (see the
 # CONTROLPLANE_LISTEN_ADDR/CONTROLPLANE_PUBLIC_URL write below, and the
 # "Configuring Nginx"/"Requesting a TLS certificate" sections further down).
-if [ "$TLS_MODE" = "http" ]; then
-    log "Installing packages (git, postgresql)"
+if [ "$OS_FAMILY" = "debian" ]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y git curl postgresql openssl
+    if [ "$TLS_MODE" = "http" ]; then
+        log "Installing packages (git, postgresql)"
+        apt-get install -y git curl postgresql openssl
+    else
+        log "Installing packages (git, postgresql, nginx, snapd)"
+        apt-get install -y git curl postgresql nginx snapd openssl
+    fi
 else
-    log "Installing packages (git, postgresql, nginx, snapd)"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y git curl postgresql nginx snapd openssl
+    # AlmaLinux/RHEL-family: postgresql-server (unlike Debian's postgresql
+    # package, dnf's doesn't init or start itself - see the initdb/enable
+    # step near "Setting up Postgres" below) and iptables-nft (the exit-node
+    # setup below shells out to `iptables` directly; a minimal AlmaLinux
+    # cloud image doesn't ship that binary at all by default, favoring
+    # firewall-cmd/nft instead).
+    if [ "$TLS_MODE" = "http" ]; then
+        log "Installing packages (git, postgresql)"
+        dnf install -y git curl postgresql-server postgresql openssl iptables-nft
+    else
+        log "Installing packages (git, postgresql, nginx, snapd)"
+        dnf install -y epel-release
+        dnf install -y git curl postgresql-server postgresql nginx snapd openssl iptables-nft
+        # snapd needs its socket unit enabled and the classic-snap symlink
+        # created by hand on RHEL-family - Debian's snapd package does both
+        # itself as part of installation.
+        systemctl enable --now snapd.socket
+        ln -sf /var/lib/snapd/snap /snap
+    fi
+fi
 
-    # -----------------------------------------------------------------------
-    # Debian/Ubuntu's apt-packaged certbot is years behind upstream (e.g.
-    # Ubuntu 24.04 ships 2.9.0) and doesn't know about IP-address
-    # certificates at all (--ip-address landed in certbot 5.3) - it rejects
-    # a bare IP outright ("will not issue certificates for a bare IP
-    # address") before ever asking Let's Encrypt. certbot's own snap is the
-    # officially recommended way to stay current, so that's what obtain_tls
-    # below relies on. If snap isn't usable on this host, this is
+if [ "$TLS_MODE" != "http" ]; then
+    # ---------------------------------------------------------------------
+    # Debian/Ubuntu's apt-packaged certbot (and AlmaLinux's EPEL one) is
+    # years behind upstream (e.g. Ubuntu 24.04 ships 2.9.0) and doesn't know
+    # about IP-address certificates at all (--ip-address landed in certbot
+    # 5.3) - it rejects a bare IP outright ("will not issue certificates for
+    # a bare IP address") before ever asking Let's Encrypt. certbot's own
+    # snap is the officially recommended way to stay current, so that's what
+    # obtain_tls below relies on. If snap isn't usable on this host, this is
     # deliberately non-fatal: obtain_tls will just fail to find certbot and
     # the existing self-signed fallback takes over.
     log "Installing certbot via snap"
@@ -203,7 +250,17 @@ fi
 log "Installing Go $GO_VERSION (apt's Go is usually too old for this project)"
 if ! command -v /usr/local/go/bin/go >/dev/null 2>&1 || \
    ! /usr/local/go/bin/go version | grep -q "go$GO_VERSION"; then
-    ARCH="$(dpkg --print-architecture)"
+    # dpkg doesn't exist on AlmaLinux/RHEL-family - fall back to uname -m's
+    # naming there instead.
+    if command -v dpkg >/dev/null 2>&1; then
+        ARCH="$(dpkg --print-architecture)"
+    else
+        case "$(uname -m)" in
+            x86_64) ARCH=amd64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) ARCH="$(uname -m)" ;;
+        esac
+    fi
     case "$ARCH" in
         amd64) GOARCH=amd64 ;;
         arm64) GOARCH=arm64 ;;
@@ -251,6 +308,36 @@ chown -R "$SYSTEM_USER:$SYSTEM_USER" "$INSTALL_ROOT"
 
 # ---------------------------------------------------------------------------
 log "Setting up Postgres"
+if [ "$OS_FAMILY" = "rhel" ]; then
+    # Debian's postgresql package initializes and starts its own cluster on
+    # install; dnf's postgresql-server does neither - both are needed by
+    # hand, guarded so a redeploy's second run doesn't try to initdb an
+    # already-initialized data directory. AlmaLinux's default module-stream
+    # package uses /var/lib/pgsql/data directly (no version subdirectory);
+    # the glob is a fallback for anything packaged the versioned way instead.
+    find_pg_datadir() {
+        if [ -d /var/lib/pgsql/data ]; then
+            echo /var/lib/pgsql/data
+        else
+            ls -d /var/lib/pgsql/*/data 2>/dev/null | head -n1
+        fi
+    }
+    PG_DATADIR="$(find_pg_datadir)"
+    if [ -z "$PG_DATADIR" ] || [ ! -f "$PG_DATADIR/PG_VERSION" ]; then
+        postgresql-setup --initdb
+        PG_DATADIR="$(find_pg_datadir)"
+    fi
+    # Default pg_hba.conf on RHEL-family authenticates 127.0.0.1/::1 TCP
+    # connections with "ident", which rejects the password auth
+    # $DATABASE_URL below relies on - Debian/Ubuntu's default already allows
+    # it, so nothing analogous was needed there.
+    if [ -n "$PG_DATADIR" ] && [ -f "$PG_DATADIR/pg_hba.conf" ]; then
+        sed -i -E 's/^(host +all +all +127\.0\.0\.1\/32 +)ident/\1scram-sha-256/' "$PG_DATADIR/pg_hba.conf"
+        sed -i -E 's/^(host +all +all +::1\/128 +)ident/\1scram-sha-256/' "$PG_DATADIR/pg_hba.conf"
+    fi
+    systemctl enable --now postgresql
+    systemctl reload postgresql 2>/dev/null || systemctl restart postgresql
+fi
 DB_NAME="openflux"
 DB_USER="openflux"
 if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
@@ -340,6 +427,14 @@ curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 || die "controlplane d
 if [ "$TLS_MODE" != "http" ]; then
 
 log "Configuring Nginx"
+# SELinux ships enforcing by default on AlmaLinux/RHEL-family and blocks
+# Nginx from making outbound connections at all (httpd_can_network_connect
+# is off by default) - without this, every proxy_pass below to
+# 127.0.0.1:8080 would 502 rather than reach controlplane. Debian/Ubuntu has
+# no SELinux, so nothing analogous applies there.
+if [ "$OS_FAMILY" = "rhel" ] && command -v setsebool >/dev/null 2>&1; then
+    setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+fi
 mkdir -p /var/www/certbot
 sed "s/__SERVER_NAME__/$SERVER_NAME/g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/sites-available/openflux"
 # Written by install.sh. HTTP-only reverse proxy in front of controlplane,

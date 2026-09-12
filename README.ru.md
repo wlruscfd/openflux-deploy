@@ -5,7 +5,8 @@
 Форк [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux). В этом репозитории
 лежит `install.sh` — скрипт, который задаёт несколько вопросов и разворачивает `controlplane` из
 [openflux-server](https://github.com/wlruscfd/openflux-server): Postgres, systemd-сервис, Nginx и
-HTTPS-сертификат (Let's Encrypt) с автопродлением — на чистом Debian/Ubuntu VPS.
+HTTPS-сертификат (Let's Encrypt) с автопродлением — на чистом Debian/Ubuntu или
+AlmaLinux/RHEL-совместимом VPS.
 
 ## Использование
 
@@ -84,8 +85,9 @@ bash install.sh
 
 Короткоживущие сертификаты Let's Encrypt для голых IP-адресов — более новая и менее обкатанная
 возможность, чем путь с доменом, и требует свежего certbot (`--ip-address` появился в 5.3, поддержка
-через webroot — в 5.4). Штатный пакет certbot из apt в Debian/Ubuntu обычно намного старше и вообще
-не умеет в сертификаты для IP, поэтому скрипт ставит certbot через snap — специально ради
+через webroot — в 5.4). Штатный пакет certbot из apt в Debian/Ubuntu (или из EPEL в AlmaLinux)
+обычно намного старше и вообще не умеет в сертификаты для IP, поэтому скрипт ставит certbot через
+snap — специально ради
 достаточно свежей версии. Тем не менее это всё ещё новая возможность Let's Encrypt со своими
 нюансами; если выпуск сертификата всё же не удастся, скрипт заметит ошибку и откатится на
 самоподписанный сертификат, а не оставит установку в полусломанном состоянии. Если есть
