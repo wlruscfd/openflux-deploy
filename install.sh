@@ -442,8 +442,14 @@ log "Configuring Nginx"
 if [ "$OS_FAMILY" = "rhel" ] && command -v setsebool >/dev/null 2>&1; then
     setsebool -P httpd_can_network_connect 1 2>/dev/null || true
 fi
-mkdir -p /var/www/certbot
-sed "s/__SERVER_NAME__/$SERVER_NAME/g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/sites-available/openflux"
+mkdir -p /var/www/certbot /etc/nginx/conf.d
+# conf.d/*.conf, not sites-available+sites-enabled: the latter is a
+# Debian/Ubuntu packaging convention that not every Debian derivative
+# actually ships (Astra Linux's nginx package doesn't create
+# sites-available at all) and that AlmaLinux/RHEL-family's nginx package
+# never uses in the first place - conf.d is the one layout every nginx
+# package here actually includes from its default nginx.conf.
+sed "s/__SERVER_NAME__/$SERVER_NAME/g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/conf.d/openflux.conf"
 # Written by install.sh. HTTP-only reverse proxy in front of controlplane,
 # also serving Let's Encrypt's HTTP-01 challenge from /var/www/certbot -
 # obtain_tls below needs that reachable before it runs. Domain mode's
@@ -468,8 +474,11 @@ server {
     }
 }
 NGINX_INITIAL_TEMPLATE
-ln -sf /etc/nginx/sites-available/openflux /etc/nginx/sites-enabled/openflux
-rm -f /etc/nginx/sites-enabled/default
+# Both are stock default vhosts that would otherwise fight ours over
+# listening on :80 as the default_server - Debian/Ubuntu/Astra's under
+# sites-enabled, AlmaLinux/RHEL-family's directly in conf.d. Harmless if
+# whichever one doesn't apply to this OS isn't present.
+rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 nginx -t
 systemctl reload nginx
 
@@ -484,7 +493,7 @@ write_https_nginx_config() {
     local cert="$1" key="$2"
     sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" \
         -e "s#__CERT_PATH__#$cert#g" \
-        -e "s#__KEY_PATH__#$key#g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/sites-available/openflux
+        -e "s#__KEY_PATH__#$key#g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/conf.d/openflux.conf
 server {
     listen 80;
     listen [::]:80;
