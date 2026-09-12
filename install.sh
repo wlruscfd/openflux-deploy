@@ -193,27 +193,34 @@ fi
 if [ "$OS_FAMILY" = "debian" ]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
+    # postgresql-contrib provides the pgcrypto extension controlplane's own
+    # first migration (0001_init.sql) requires - not pulled in by the
+    # postgresql metapackage itself. This bit plain Debian/Astra despite
+    # apparently working fine on stock Ubuntu, whose postgresql metapackage
+    # depends on it transitively through a different chain of packages that
+    # doesn't hold everywhere.
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
-        apt-get install -y git curl postgresql openssl
+        apt-get install -y git curl postgresql postgresql-contrib openssl
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
-        apt-get install -y git curl postgresql nginx snapd openssl
+        apt-get install -y git curl postgresql postgresql-contrib nginx snapd openssl
     fi
 else
     # AlmaLinux/RHEL-family: postgresql-server (unlike Debian's postgresql
     # package, dnf's doesn't init or start itself - see the initdb/enable
-    # step near "Setting up Postgres" below) and iptables-nft (the exit-node
-    # setup below shells out to `iptables` directly; a minimal AlmaLinux
-    # cloud image doesn't ship that binary at all by default, favoring
-    # firewall-cmd/nft instead).
+    # step near "Setting up Postgres" below), postgresql-contrib (pgcrypto -
+    # see the comment on the Debian branch above), and iptables-nft (the
+    # exit-node setup below shells out to `iptables` directly; a minimal
+    # AlmaLinux cloud image doesn't ship that binary at all by default,
+    # favoring firewall-cmd/nft instead).
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
-        dnf install -y git curl postgresql-server postgresql openssl iptables-nft
+        dnf install -y git curl postgresql-server postgresql postgresql-contrib openssl iptables-nft
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
         dnf install -y epel-release
-        dnf install -y git curl postgresql-server postgresql nginx snapd openssl iptables-nft
+        dnf install -y git curl postgresql-server postgresql postgresql-contrib nginx snapd openssl iptables-nft
         # snapd needs its socket unit enabled and the classic-snap symlink
         # created by hand on RHEL-family - Debian's snapd package does both
         # itself as part of installation.
