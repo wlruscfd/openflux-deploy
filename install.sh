@@ -104,13 +104,31 @@ echo "Answer the questions below; press Enter to accept the default in [brackets
 ask REPO_URL "openflux-server repo URL" "$DEFAULT_REPO_URL"
 ask GIT_REF "Git branch/tag to deploy" "main"
 
-ask TLS_MODE "TLS mode - 'domain' or 'ip'" "ip"
+echo
+echo "Before you continue: your VPS/cloud firewall (security group) needs to allow"
+echo "inbound TCP 443 (plus 80, briefly, for Let's Encrypt) for 'domain'/'ip' mode below,"
+echo "or TCP 8080 for 'http' mode - whichever you pick, that port has to be reachable"
+echo "from the internet or nothing past this point will actually be usable."
+echo
+
+ask TLS_MODE "TLS mode - 'domain', 'ip', or 'http' (no panel/TLS - manage only via the app)" "ip"
 if [ "$TLS_MODE" = "domain" ]; then
     ask DOMAIN "Domain name pointing at this server's IP" ""
     [ -n "$DOMAIN" ] || die "A domain is required in domain mode."
     ask LE_EMAIL "Email for Let's Encrypt account/renewal notices" ""
     [ -n "$LE_EMAIL" ] || die "An email is required for Let's Encrypt registration."
     SERVER_NAME="$DOMAIN"
+elif [ "$TLS_MODE" = "http" ]; then
+    DETECTED_IP="$(curl -fsS --max-time 5 https://ifconfig.me || true)"
+    ask SERVER_IP "Public IP of this server" "$DETECTED_IP"
+    [ -n "$SERVER_IP" ] || die "Could not detect the public IP automatically - enter it manually."
+    SERVER_NAME="$SERVER_IP"
+    warn "http mode: the admin API will be served in PLAIN HTTP on port 8080, with no" \
+         "Nginx or TLS in front of it at all - anyone on the network path (your ISP, the" \
+         "VPS host's network, a coffee-shop Wi-Fi) can read the admin token and every" \
+         "request in transit. Only pick this if you're managing everything from the app" \
+         "and understand that tradeoff; 'ip' mode costs nothing extra and keeps the panel" \
+         "on HTTPS instead."
 else
     DETECTED_IP="$(curl -fsS --max-time 5 https://ifconfig.me || true)"
     ask SERVER_IP "Public IP of this server" "$DETECTED_IP"
@@ -142,30 +160,43 @@ if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-log "Installing packages (git, postgresql, nginx, snapd)"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y git curl postgresql nginx snapd openssl
-
-# ---------------------------------------------------------------------------
-# Debian/Ubuntu's apt-packaged certbot is years behind upstream (e.g. Ubuntu
-# 24.04 ships 2.9.0) and doesn't know about IP-address certificates at all
-# (--ip-address landed in certbot 5.3) - it rejects a bare IP outright
-# ("will not issue certificates for a bare IP address") before ever asking
-# Let's Encrypt. certbot's own snap is the officially recommended way to
-# stay current, so that's what obtain_tls below relies on. If snap isn't
-# usable on this host, this is deliberately non-fatal: obtain_tls will just
-# fail to find certbot and the existing self-signed fallback takes over.
-log "Installing certbot via snap"
-if command -v snap >/dev/null 2>&1 &&
-    snap wait system seed.loaded 2>/dev/null &&
-    { snap install core >/dev/null 2>&1 || true; } &&
-    { snap refresh core >/dev/null 2>&1 || true; } &&
-    snap install --classic certbot; then
-    ln -sf /snap/bin/certbot /usr/bin/certbot
+# http mode skips Nginx and certbot entirely - controlplane is reachable
+# directly on plain HTTP with nothing in front of it, so there's no reverse
+# proxy or certificate to install in the first place (see the
+# CONTROLPLANE_LISTEN_ADDR/CONTROLPLANE_PUBLIC_URL write below, and the
+# "Configuring Nginx"/"Requesting a TLS certificate" sections further down).
+if [ "$TLS_MODE" = "http" ]; then
+    log "Installing packages (git, postgresql)"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y git curl postgresql openssl
 else
-    warn "Could not install certbot via snap (snap may not be usable on this host)."
-    warn "TLS certificate issuance below will fail and fall back to a self-signed certificate."
+    log "Installing packages (git, postgresql, nginx, snapd)"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y git curl postgresql nginx snapd openssl
+
+    # -----------------------------------------------------------------------
+    # Debian/Ubuntu's apt-packaged certbot is years behind upstream (e.g.
+    # Ubuntu 24.04 ships 2.9.0) and doesn't know about IP-address
+    # certificates at all (--ip-address landed in certbot 5.3) - it rejects
+    # a bare IP outright ("will not issue certificates for a bare IP
+    # address") before ever asking Let's Encrypt. certbot's own snap is the
+    # officially recommended way to stay current, so that's what obtain_tls
+    # below relies on. If snap isn't usable on this host, this is
+    # deliberately non-fatal: obtain_tls will just fail to find certbot and
+    # the existing self-signed fallback takes over.
+    log "Installing certbot via snap"
+    if command -v snap >/dev/null 2>&1 &&
+        snap wait system seed.loaded 2>/dev/null &&
+        { snap install core >/dev/null 2>&1 || true; } &&
+        { snap refresh core >/dev/null 2>&1 || true; } &&
+        snap install --classic certbot; then
+        ln -sf /snap/bin/certbot /usr/bin/certbot
+    else
+        warn "Could not install certbot via snap (snap may not be usable on this host)."
+        warn "TLS certificate issuance below will fail and fall back to a self-signed certificate."
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -236,12 +267,22 @@ DATABASE_URL="postgres://$DB_USER:$DB_PASSWORD@127.0.0.1:5432/$DB_NAME?sslmode=d
 # ---------------------------------------------------------------------------
 log "Writing $ENV_FILE"
 mkdir -p "$(dirname "$ENV_FILE")"
+if [ "$TLS_MODE" = "http" ]; then
+    # No Nginx in front of it in this mode - controlplane has to bind the
+    # public interface itself, and CONTROLPLANE_PUBLIC_URL has to name its
+    # own port since there's no :80/:443 in front doing that implicitly.
+    CONTROLPLANE_LISTEN_ADDR="0.0.0.0:8080"
+    CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:8080"
+else
+    CONTROLPLANE_LISTEN_ADDR="127.0.0.1:8080"
+    CONTROLPLANE_PUBLIC_URL="https://$SERVER_NAME"
+fi
 cat > "$ENV_FILE" <<EOF
 CONTROLPLANE_DATABASE_URL=$DATABASE_URL
 CONTROLPLANE_TOKEN_PEPPER=$TOKEN_PEPPER
 CONTROLPLANE_ADMIN_TOKEN=$ADMIN_TOKEN
-CONTROLPLANE_LISTEN_ADDR=127.0.0.1:8080
-CONTROLPLANE_PUBLIC_URL=https://$SERVER_NAME
+CONTROLPLANE_LISTEN_ADDR=$CONTROLPLANE_LISTEN_ADDR
+CONTROLPLANE_PUBLIC_URL=$CONTROLPLANE_PUBLIC_URL
 EOF
 chown "$SYSTEM_USER:$SYSTEM_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -293,6 +334,11 @@ done
 curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 || die "controlplane did not start - check: journalctl -u $SERVICE_NAME"
 
 # ---------------------------------------------------------------------------
+# http mode has no Nginx installed at all (see the package-install step
+# above) - controlplane is reached directly on its own plain-HTTP port, so
+# there's nothing to reverse-proxy and no certificate to request.
+if [ "$TLS_MODE" != "http" ]; then
+
 log "Configuring Nginx"
 mkdir -p /var/www/certbot
 sed "s/__SERVER_NAME__/$SERVER_NAME/g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/sites-available/openflux"
@@ -428,6 +474,10 @@ else
     write_https_nginx_config /etc/openflux/tls/selfsigned.crt /etc/openflux/tls/selfsigned.key
 fi
 
+else
+    log "http mode: skipping Nginx/TLS - controlplane is reachable directly on $CONTROLPLANE_PUBLIC_URL"
+fi
+
 # ---------------------------------------------------------------------------
 # A caller can hand NODE_TOKEN in directly (matching every other
 # ask()-skippable variable in this script) to recover a node whose token
@@ -525,7 +575,7 @@ NODEAGENT_SERVICE_TEMPLATE
 fi
 
 # ---------------------------------------------------------------------------
-PANEL_URL="https://$SERVER_NAME/admin/"
+PANEL_URL="$CONTROLPLANE_PUBLIC_URL/admin/"
 log "Done"
 cat <<SUMMARY
 
@@ -535,6 +585,12 @@ cat <<SUMMARY
   cannot be recovered from the server afterwards)
 
 SUMMARY
+
+if [ "$TLS_MODE" = "http" ]; then
+    warn "http mode: the admin token above (and every request to $PANEL_URL) travels in" \
+         "plain text - anyone on the network path can read it. Make sure TCP 8080 is open" \
+         "in your VPS firewall/security group for this to be reachable at all."
+fi
 
 if [ -n "$NODE_TOKEN" ]; then
 cat <<NODESUMMARY
@@ -550,7 +606,7 @@ NODESUMMARY
 cat <<NODESUMMARY
   On the exit-node machine:
     ./universal-bypass-tool --exit-node --managed \\
-        --control-url "https://$SERVER_NAME" \\
+        --control-url "$CONTROLPLANE_PUBLIC_URL" \\
         --node-token "$NODE_TOKEN"
 
 NODESUMMARY
