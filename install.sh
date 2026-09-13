@@ -86,15 +86,29 @@ ask() {
     # this is what lets a caller (e.g. the Android app's SSH deployer)
     # drive this script non-interactively by pre-exporting every variable
     # it asks about, with zero changes to the interactive experience below.
+    #
+    # Reads from /dev/tty, not stdin: this script is meant to be run as
+    # `curl ... | sudo bash`, where fd 0 is the pipe carrying the script's
+    # own remaining bytes, not the keyboard - `read` on plain stdin there
+    # would consume the script's own source as "input" instead of ever
+    # reaching the terminal. /dev/tty is the actual controlling terminal
+    # regardless of what's on fd 0, so this is what a real human at a
+    # keyboard needs for prompts to work at all. Neither this script being
+    # saved to a file first (the older documented flow) nor a truly
+    # non-interactive caller (no controlling terminal at all, e.g. the
+    # app's SSH exec) is affected: /dev/tty is always the right thing to
+    # read in the first case, and simply fails to open in the second,
+    # exactly like reading a closed stdin would - `|| true` treats both the
+    # same and falls through to the default.
     local __var="$1" __prompt="$2" __default="${3:-}" __reply
     if [ -n "${!__var:-}" ]; then
         return
     fi
     if [ -n "$__default" ]; then
-        read -r -p "$__prompt [$__default]: " __reply || true
+        read -r -p "$__prompt [$__default]: " __reply < /dev/tty 2>/dev/null || true
         __reply="${__reply:-$__default}"
     else
-        read -r -p "$__prompt: " __reply || true
+        read -r -p "$__prompt: " __reply < /dev/tty 2>/dev/null || true
     fi
     printf -v "$__var" '%s' "$__reply"
 }
@@ -104,7 +118,7 @@ ask_secret() {
     if [ -n "${!__var:-}" ]; then
         return
     fi
-    read -r -s -p "$__prompt (leave blank to auto-generate): " __reply || true
+    read -r -s -p "$__prompt (leave blank to auto-generate): " __reply < /dev/tty 2>/dev/null || true
     echo
     printf -v "$__var" '%s' "$__reply"
 }
