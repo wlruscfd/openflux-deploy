@@ -132,7 +132,8 @@ ask GIT_REF "Git branch/tag to deploy" "main"
 
 echo
 echo "Before you continue: your VPS/cloud firewall (security group) needs to allow"
-echo "inbound TCP 443 (plus 80, briefly, for Let's Encrypt) for 'domain'/'ip' mode below,"
+echo "inbound TCP 443 (plus 80, briefly, for Let's Encrypt) for 'domain'/'ip' mode below -"
+echo "443 is just the default and can be changed in a moment if it's already taken -"
 echo "or TCP 8080 for 'http' mode - whichever you pick, that port has to be reachable"
 echo "from the internet or nothing past this point will actually be usable."
 echo
@@ -144,6 +145,7 @@ if [ "$TLS_MODE" = "domain" ]; then
     ask LE_EMAIL "Email for Let's Encrypt account/renewal notices" ""
     [ -n "$LE_EMAIL" ] || die "An email is required for Let's Encrypt registration."
     SERVER_NAME="$DOMAIN"
+    ask HTTPS_PORT "HTTPS port for the panel (change only if 443 is already used by something else on this server)" "443"
 elif [ "$TLS_MODE" = "http" ]; then
     DETECTED_IP="$(curl -fsS --max-time 5 https://ifconfig.me || true)"
     ask SERVER_IP "Public IP of this server" "$DETECTED_IP"
@@ -160,7 +162,12 @@ else
     ask SERVER_IP "Public IP of this server" "$DETECTED_IP"
     [ -n "$SERVER_IP" ] || die "Could not detect the public IP automatically - enter it manually."
     SERVER_NAME="$SERVER_IP"
+    ask HTTPS_PORT "HTTPS port for the panel (change only if 443 is already used by something else on this server)" "443"
 fi
+# Referenced unconditionally below (nginx templates, CONTROLPLANE_PUBLIC_URL,
+# the firewall step) regardless of mode - defaulted here so http mode (which
+# never touches it) doesn't need special-casing at every use site.
+HTTPS_PORT="${HTTPS_PORT:-443}"
 
 ask WEB_PANEL "Install the SvelteKit web panel (Bun)? (y/n)" "y"
 
@@ -180,7 +187,10 @@ if [ "$OS_FAMILY" = "rhel" ] && command -v firewall-cmd >/dev/null 2>&1 && syste
             *)   firewall-cmd --permanent --add-port=8080/tcp ;;
         esac
     else
-        firewall-cmd --permanent --add-service=http --add-service=https
+        # --add-service=https is just a named alias for --add-port=443/tcp -
+        # using --add-port directly here instead covers a non-default
+        # HTTPS_PORT too.
+        firewall-cmd --permanent --add-service=http --add-port="$HTTPS_PORT/tcp"
     fi
     firewall-cmd --reload
 fi
@@ -441,7 +451,11 @@ if [ "$TLS_MODE" = "http" ]; then
     fi
 else
     CONTROLPLANE_LISTEN_ADDR="127.0.0.1:8080"
-    CONTROLPLANE_PUBLIC_URL="https://$SERVER_NAME"
+    if [ "$HTTPS_PORT" = "443" ]; then
+        CONTROLPLANE_PUBLIC_URL="https://$SERVER_NAME"
+    else
+        CONTROLPLANE_PUBLIC_URL="https://$SERVER_NAME:$HTTPS_PORT"
+    fi
 fi
 cat > "$ENV_FILE" <<EOF
 CONTROLPLANE_DATABASE_URL=$DATABASE_URL
@@ -668,9 +682,13 @@ systemctl reload nginx
 # webroot-based renewal (IP mode) keeps working without editing this again.
 write_https_nginx_config() {
     local cert="$1" key="$2"
+    local redirect_port_suffix=""
+    [ "$HTTPS_PORT" = "443" ] || redirect_port_suffix=":$HTTPS_PORT"
     sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" \
         -e "s#__CERT_PATH__#$cert#g" \
-        -e "s#__KEY_PATH__#$key#g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/conf.d/openflux.conf
+        -e "s#__KEY_PATH__#$key#g" \
+        -e "s/__HTTPS_PORT__/$HTTPS_PORT/g" \
+        -e "s/__REDIRECT_PORT_SUFFIX__/$redirect_port_suffix/g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/conf.d/openflux.conf
 server {
     listen 80;
     listen [::]:80;
@@ -681,13 +699,13 @@ server {
     }
 
     location / {
-        return 301 https://$host$request_uri;
+        return 301 https://$host__REDIRECT_PORT_SUFFIX__$request_uri;
     }
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
+    listen __HTTPS_PORT__ ssl;
+    listen [::]:__HTTPS_PORT__ ssl;
     server_name __SERVER_NAME__;
 
     ssl_certificate __CERT_PATH__;
@@ -709,7 +727,12 @@ NGINX_HTTPS_TEMPLATE
 # certificate instead of leaving the panel on plain HTTP or aborting.
 obtain_tls() {
     if [ "$TLS_MODE" = "domain" ]; then
-        certbot --nginx --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_NAME" --redirect
+        # --https-port only matters when it differs from certbot's own
+        # default (443) - passed unconditionally is harmless either way,
+        # but this keeps the common-case invocation exactly as before.
+        local https_port_flag=""
+        [ "$HTTPS_PORT" = "443" ] || https_port_flag="--https-port $HTTPS_PORT"
+        certbot --nginx --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_NAME" --redirect $https_port_flag
         return $?
     fi
 
@@ -815,6 +838,14 @@ if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ 
     # pile up a duplicate copy of this rule every time.
     iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP 2>/dev/null || \
         iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+
+    # Same problem, UDP side: the raw socket claims inbound UDP datagrams
+    # for ports the kernel's own UDP stack never opened a socket on, so the
+    # kernel answers those with its own "port unreachable" ICMP before our
+    # relayed response ever gets a chance to - tearing the flow down from
+    # the remote peer's point of view mid-exchange.
+    iptables -C OUTPUT -p icmp --icmp-type port-unreachable -j DROP 2>/dev/null || \
+        iptables -A OUTPUT -p icmp --icmp-type port-unreachable -j DROP
 
     mkdir -p "$(dirname "$NODEAGENT_ENV_FILE")"
     cat > "$NODEAGENT_ENV_FILE" <<EOF

@@ -30,6 +30,8 @@ sudo bash install.sh
   была доступна по HTTPS).
 - Токен администратора (или нажмите Enter, чтобы сгенерировать) — именно его вы вставите потом в
   панель управления по адресу `https://<ваш-домен-или-ip>/admin/`.
+- Для режимов `domain`/`ip`: какой HTTPS-порт использовать (по умолчанию `443`) — менять стоит,
+  только если он уже занят чем-то другим на сервере.
 - Ставить ли полноценную **SvelteKit-панель** (нужен Bun; по умолчанию да): она отдаёт дашборд по
   адресу `/admin/` за Nginx, рядом с `/v1/*` от controlplane. Если ответить «n», останется исходная
   самодостаточная панель, встроенная прямо в бинарник controlplane (тоже по адресу `/admin/`).
@@ -62,9 +64,9 @@ sudo bash install.sh
 ## Неинтерактивный / автоматический запуск
 
 Любой вопрос пропускается, если соответствующая переменная уже задана в окружении (`REPO_URL`,
-`GIT_REF`, `TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `ADMIN_TOKEN`, `DB_PASSWORD`,
-`REGISTER_NODE`, `NODE_NAME`, `NODE_MAX_KEYS`, `WEB_PANEL` — именно эти имена используются внутри
-скрипта), поэтому его можно запускать без человека за клавиатурой:
+`GIT_REF`, `TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `HTTPS_PORT`, `ADMIN_TOKEN`,
+`DB_PASSWORD`, `REGISTER_NODE`, `NODE_NAME`, `NODE_MAX_KEYS`, `WEB_PANEL` — именно эти имена
+используются внутри скрипта), поэтому его можно запускать без человека за клавиатурой:
 
 ```bash
 REPO_URL=https://github.com/wlruscfd/openflux-server.git GIT_REF=main \

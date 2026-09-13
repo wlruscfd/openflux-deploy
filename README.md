@@ -29,6 +29,8 @@ It will ask for:
   reachable over HTTPS either way).
 - An admin token (or press Enter to generate one) - this is what you'll paste into the admin panel
   at `https://<your-domain-or-ip>/admin/` afterwards.
+- For `domain`/`ip` mode: which HTTPS port to use (default `443`) - only worth changing if
+  something else on the server already owns it.
 - Whether to install the full **SvelteKit web panel** (requires Bun; default yes): it serves the
   dashboard at `/admin/` behind Nginx next to controlplane's `/v1/*`. Say "n" and you get the
   original, self-contained panel that's embedded inside the controlplane binary itself (still
@@ -60,9 +62,9 @@ none of this applies to it.
 ## Non-interactive / automated use
 
 Every prompt is skipped if its variable is already set in the environment (`REPO_URL`, `GIT_REF`,
-`TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `ADMIN_TOKEN`, `DB_PASSWORD`, `REGISTER_NODE`,
-`NODE_NAME`, `NODE_MAX_KEYS`, `WEB_PANEL` - the exact names used inside the script), so it can be
-driven without a human at the keyboard:
+`TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `HTTPS_PORT`, `ADMIN_TOKEN`, `DB_PASSWORD`,
+`REGISTER_NODE`, `NODE_NAME`, `NODE_MAX_KEYS`, `WEB_PANEL` - the exact names used inside the
+script), so it can be driven without a human at the keyboard:
 
 ```bash
 REPO_URL=https://github.com/wlruscfd/openflux-server.git GIT_REF=main \
