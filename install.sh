@@ -23,6 +23,8 @@ ENV_FILE="/etc/openflux/controlplane.env"
 NODEAGENT_ENV_FILE="/etc/openflux/nodeagent.env"
 SERVICE_NAME="openflux-controlplane"
 NODEAGENT_SERVICE_NAME="openflux-nodeagent"
+WEB_SERVICE_NAME="openflux-web"
+WEB_ENV_FILE="/etc/openflux/web.env"
 SYSTEM_USER="openflux"
 DEFAULT_REPO_URL="https://github.com/wlruscfd/openflux-server.git"
 
@@ -146,6 +148,8 @@ else
     SERVER_NAME="$SERVER_IP"
 fi
 
+ask WEB_PANEL "Install the SvelteKit web panel (Bun)? (y/n)" "y"
+
 # AlmaLinux/RHEL-family ships firewalld active by default, allowing nothing
 # but SSH in - unlike Debian/Ubuntu, which has no firewall active out of the
 # box, so nothing was needed here for that family. Without this, the VPS/
@@ -154,7 +158,13 @@ fi
 if [ "$OS_FAMILY" = "rhel" ] && command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
     log "Opening the needed port(s) in firewalld"
     if [ "$TLS_MODE" = "http" ]; then
-        firewall-cmd --permanent --add-port=8080/tcp
+        # The SvelteKit web panel is the single public origin in http mode
+        # (it proxies /v1/* to controlplane itself), so it needs the public
+        # port instead of controlplane.
+        case "${WEB_PANEL:-n}" in
+            y|Y) firewall-cmd --permanent --add-port=3000/tcp ;;
+            *)   firewall-cmd --permanent --add-port=8080/tcp ;;
+        esac
     else
         firewall-cmd --permanent --add-service=http --add-service=https
     fi
@@ -201,10 +211,10 @@ if [ "$OS_FAMILY" = "debian" ]; then
     # doesn't hold everywhere.
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
-        apt-get install -y git curl postgresql postgresql-contrib openssl
+        apt-get install -y git curl postgresql postgresql-contrib openssl unzip
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
-        apt-get install -y git curl postgresql postgresql-contrib nginx snapd openssl
+        apt-get install -y git curl postgresql postgresql-contrib nginx snapd openssl unzip
     fi
 else
     # AlmaLinux/RHEL-family: postgresql-server (unlike Debian's postgresql
@@ -216,11 +226,11 @@ else
     # favoring firewall-cmd/nft instead).
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
-        dnf install -y git curl postgresql-server postgresql postgresql-contrib openssl iptables-nft
+        dnf install -y git curl postgresql-server postgresql postgresql-contrib openssl iptables-nft unzip
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
         dnf install -y epel-release
-        dnf install -y git curl postgresql-server postgresql postgresql-contrib nginx snapd openssl iptables-nft
+        dnf install -y git curl postgresql-server postgresql postgresql-contrib nginx snapd openssl iptables-nft unzip
         # snapd needs its socket unit enabled and the classic-snap symlink
         # created by hand on RHEL-family - Debian's snapd package does both
         # itself as part of installation.
@@ -308,6 +318,43 @@ if [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; then
     ( cd "$SRC_DIR" && go build -o "$BIN_DIR/universal-bypass-tool" . )
 fi
 
+# The SvelteKit web panel (../server/controlplane/web) is optional: controlplane
+# always serves its own embedded panel at /admin/ regardless (see admin.html),
+# so if Bun isn't available or the panel fails to build, this only disables the
+# fancier frontend, never the service. WEB_PANEL was asked before package
+# install; a failed install/build flips it to "n" and the script carries on
+# with the embedded panel - which is also exactly what happens for
+# non-interactive callers (e.g. deployssh) that don't pre-set WEB_PANEL.
+WEB_BUN="${WEB_BUN:-}"
+if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
+    log "Setting up Bun (for the SvelteKit web panel)"
+    WEB_BUN="$(command -v bun || true)"
+    if [ -z "$WEB_BUN" ]; then
+        BUN_INSTALL_DIR="$INSTALL_ROOT/bun"
+        if BUN_INSTALL="$BUN_INSTALL_DIR" curl -fsSL https://bun.sh/install | bash; then
+            WEB_BUN="$BUN_INSTALL_DIR/bin/bun"
+        else
+            warn "Bun install failed - falling back to controlplane's embedded panel."
+            WEB_PANEL="n"
+        fi
+    fi
+fi
+if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
+    log "Building the SvelteKit web panel"
+    WEB_DIR="$INSTALL_ROOT/web"
+    if ( cd "$SRC_DIR/controlplane/web" \
+        && "$WEB_BUN" install \
+        && "$WEB_BUN" run build \
+        && mkdir -p "$WEB_DIR" \
+        && cp -a build "$WEB_DIR/" \
+        && cp server.js "$WEB_DIR/" ); then
+        log "Web panel built to $WEB_DIR"
+    else
+        warn "Web panel build failed - falling back to controlplane's embedded panel."
+        WEB_PANEL="n"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 log "Setting up the openflux system user"
 id -u "$SYSTEM_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$SYSTEM_USER"
@@ -361,12 +408,23 @@ DATABASE_URL="postgres://$DB_USER:$DB_PASSWORD@127.0.0.1:5432/$DB_NAME?sslmode=d
 # ---------------------------------------------------------------------------
 log "Writing $ENV_FILE"
 mkdir -p "$(dirname "$ENV_FILE")"
+# In ip/domain mode Nginx fronts both services on the same HTTPS origin, so
+# controlplane stays on loopback and CONTROLPLANE_PUBLIC_URL names the
+# Nginx host. http mode has no Nginx: if the web panel is installed it
+# becomes the single public origin on :3000 and proxies /v1/* back to
+# controlplane (which then only needs loopback); without it controlplane
+# binds the public interface directly as before.
+WEB_HOST="127.0.0.1"
+WEB_PORT="3000"
 if [ "$TLS_MODE" = "http" ]; then
-    # No Nginx in front of it in this mode - controlplane has to bind the
-    # public interface itself, and CONTROLPLANE_PUBLIC_URL has to name its
-    # own port since there's no :80/:443 in front doing that implicitly.
-    CONTROLPLANE_LISTEN_ADDR="0.0.0.0:8080"
-    CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:8080"
+    if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
+        CONTROLPLANE_LISTEN_ADDR="127.0.0.1:8080"
+        CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:3000"
+        WEB_HOST="0.0.0.0"
+    else
+        CONTROLPLANE_LISTEN_ADDR="0.0.0.0:8080"
+        CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:8080"
+    fi
 else
     CONTROLPLANE_LISTEN_ADDR="127.0.0.1:8080"
     CONTROLPLANE_PUBLIC_URL="https://$SERVER_NAME"
@@ -380,6 +438,19 @@ CONTROLPLANE_PUBLIC_URL=$CONTROLPLANE_PUBLIC_URL
 EOF
 chown "$SYSTEM_USER:$SYSTEM_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+
+# The web panel's own env - CONTROLPLANE_UPSTREAM is where it forwards /v1/*
+# and /healthz (in http mode this is what lets the browser use one origin);
+# the web service still binds on loopback unless http mode needs it public.
+if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
+    cat > "$WEB_ENV_FILE" <<EOF
+CONTROLPLANE_UPSTREAM=http://127.0.0.1:8080
+CONTROLPLANE_WEB_HOST=$WEB_HOST
+CONTROLPLANE_WEB_PORT=$WEB_PORT
+EOF
+    chown "$SYSTEM_USER:$SYSTEM_USER" "$WEB_ENV_FILE"
+    chmod 600 "$WEB_ENV_FILE"
+fi
 
 # ---------------------------------------------------------------------------
 # Templates below are inlined (not read from a sibling templates/ directory)
@@ -420,6 +491,44 @@ systemctl enable "$SERVICE_NAME"
 # or redeploy alike.
 systemctl restart "$SERVICE_NAME"
 
+# The web panel service uses the same restart-not-just-start approach as
+# controlplane above, so a redeploy picks up the freshly built frontend
+# instead of keeping a stale one warm.
+if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
+    log "Installing the web panel systemd service"
+    [ -n "$WEB_BUN" ] || WEB_BUN="$(command -v bun || echo /opt/openflux/bun/bin/bun)"
+    sed -e "s#/opt/openflux#$INSTALL_ROOT#g" \
+        -e "s#__WEB_BUN__#$WEB_BUN#g" \
+        -e "s#__CONTROLPLANE_SERVICE__#$SERVICE_NAME#g" \
+        <<'WEB_SERVICE_TEMPLATE' > "/etc/systemd/system/$WEB_SERVICE_NAME.service"
+[Unit]
+Description=OpenFlux control-plane web panel (SvelteKit)
+After=network.target __CONTROLPLANE_SERVICE__.service
+Wants=__CONTROLPLANE_SERVICE__.service
+
+[Service]
+Type=simple
+User=openflux
+Group=openflux
+WorkingDirectory=/opt/openflux/web
+EnvironmentFile=/etc/openflux/web.env
+ExecStart=__WEB_BUN__ server.js
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/openflux
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+WEB_SERVICE_TEMPLATE
+    systemctl daemon-reload
+    systemctl enable "$WEB_SERVICE_NAME"
+    systemctl restart "$WEB_SERVICE_NAME"
+fi
+
 log "Waiting for controlplane to come up"
 for _ in $(seq 1 20); do
     curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 && break
@@ -448,6 +557,53 @@ fi
 # it's already running either way.
 systemctl enable --now nginx
 mkdir -p /var/www/certbot /etc/nginx/conf.d
+# One snippet holds every proxy location block and is `include`d from both
+# vhost templates below (they have to stay identical for the certbot --nginx
+# and hand-written-https paths). With the SvelteKit panel installed, /admin/
+# goes to Bun on :3000 while /v1/ + /healthz stay on controlplane - without
+# it, everything lands on controlplane, which still serves its embedded
+# panel at /admin/ on its own.
+write_web_locations() {
+    if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
+        cat > /etc/nginx/conf.d/openflux-locations.conf <<'WEB_LOCS'
+    location /healthz {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+    }
+
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /admin/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        return 404;
+    }
+WEB_LOCS
+    else
+        cat > /etc/nginx/conf.d/openflux-locations.conf <<'WEB_LOCS'
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+WEB_LOCS
+    fi
+}
+write_web_locations
 # conf.d/*.conf, not sites-available+sites-enabled: the latter is a
 # Debian/Ubuntu packaging convention that not every Debian derivative
 # actually ships (Astra Linux's nginx package doesn't create
@@ -455,12 +611,12 @@ mkdir -p /var/www/certbot /etc/nginx/conf.d
 # never uses in the first place - conf.d is the one layout every nginx
 # package here actually includes from its default nginx.conf.
 sed "s/__SERVER_NAME__/$SERVER_NAME/g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/conf.d/openflux.conf"
-# Written by install.sh. HTTP-only reverse proxy in front of controlplane,
-# also serving Let's Encrypt's HTTP-01 challenge from /var/www/certbot -
-# obtain_tls below needs that reachable before it runs. Domain mode's
-# certbot --nginx plugin rewrites this into an HTTPS block itself; IP mode
-# (and the self-signed fallback) get a hand-written one - see obtain_tls
-# and write_https_nginx_config.
+# Written by install.sh. HTTP-only reverse proxy in front of the control
+# plane services, also serving Let's Encrypt's HTTP-01 challenge from
+# /var/www/certbot - obtain_tls below needs that reachable before it runs.
+# Domain mode's certbot --nginx plugin rewrites this into an HTTPS block
+# itself; IP mode (and the self-signed fallback) get a hand-written one -
+# see obtain_tls and write_https_nginx_config.
 server {
     listen 80;
     listen [::]:80;
@@ -470,13 +626,7 @@ server {
         root /var/www/certbot;
     }
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
+    include /etc/nginx/conf.d/openflux-locations.conf;
 }
 NGINX_INITIAL_TEMPLATE
 # Both are stock default vhosts that would otherwise fight ours over
@@ -521,13 +671,7 @@ server {
     ssl_certificate __CERT_PATH__;
     ssl_certificate_key __KEY_PATH__;
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
+    include /etc/nginx/conf.d/openflux-locations.conf;
 }
 NGINX_HTTPS_TEMPLATE
     nginx -t
@@ -703,8 +847,13 @@ cat <<SUMMARY
 SUMMARY
 
 if [ "$TLS_MODE" = "http" ]; then
+    if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
+        HTTP_PORT="3000"
+    else
+        HTTP_PORT="8080"
+    fi
     warn "http mode: the admin token above (and every request to $PANEL_URL) travels in" \
-         "plain text - anyone on the network path can read it. Make sure TCP 8080 is open" \
+         "plain text - anyone on the network path can read it. Make sure TCP $HTTP_PORT is open" \
          "in your VPS firewall/security group for this to be reachable at all."
 fi
 

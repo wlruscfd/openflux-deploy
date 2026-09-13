@@ -30,6 +30,11 @@ It will ask for:
   reachable over HTTPS either way).
 - An admin token (or press Enter to generate one) - this is what you'll paste into the admin panel
   at `https://<your-domain-or-ip>/admin/` afterwards.
+- Whether to install the full **SvelteKit web panel** (requires Bun; default yes): it serves the
+  dashboard at `/admin/` behind Nginx next to controlplane's `/v1/*`. Say "n" and you get the
+  original, self-contained panel that's embedded inside the controlplane binary itself (still
+  served at `/admin/`). Saying "y" here *never* breaks an install — if Bun can't be installed or
+  the panel fails to build, the script degrades to the embedded panel and says so.
 - Whether to register a first exit node right away.
 
 At the end it prints the panel URL, the admin token (**save it - it's stored hashed and can't be
@@ -57,27 +62,34 @@ none of this applies to it.
 
 Every prompt is skipped if its variable is already set in the environment (`REPO_URL`, `GIT_REF`,
 `TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `ADMIN_TOKEN`, `DB_PASSWORD`, `REGISTER_NODE`,
-`NODE_NAME`, `NODE_MAX_KEYS` - the exact names used inside the script), so it can be driven without
-a human at the keyboard:
+`NODE_NAME`, `NODE_MAX_KEYS`, `WEB_PANEL` - the exact names used inside the script), so it can be
+driven without a human at the keyboard:
 
 ```bash
 REPO_URL=https://github.com/wlruscfd/openflux-server.git GIT_REF=main \
 TLS_MODE=domain DOMAIN=panel.example.com LE_EMAIL=you@example.com \
 ADMIN_TOKEN="$(openssl rand -hex 32)" DB_PASSWORD="$(openssl rand -hex 24)" \
-REGISTER_NODE=y NODE_NAME=node-1 NODE_MAX_KEYS=500 \
+REGISTER_NODE=y NODE_NAME=node-1 NODE_MAX_KEYS=500 WEB_PANEL=y \
 bash install.sh
 ```
 
 This is exactly what the [openflux-app](https://github.com/wlruscfd/openflux-app) Android app's
-**Deploy** tab does over SSH, so you never see a prompt when deploying from the app.
+**Deploy** tab does over SSH, so you never see a prompt when deploying from the app. Non-interactive
+callers that don't pre-set `WEB_PANEL` get the embedded panel - the script does not prompt where
+stdin isn't interactive.
 
 ## What it sets up
 
-- `openflux` system user, `/opt/openflux/{bin,server}`, `/etc/openflux/controlplane.env` (mode
+- `openflux` system user, `/opt/openflux/{bin,server,web}`, `/etc/openflux/controlplane.env` (mode
   `600`, holds the DB URL / token pepper / admin token).
 - A local Postgres role + database.
 - `openflux-controlplane.service` (systemd unit, embedded in install.sh), enabled and started.
-- Nginx reverse-proxying to `127.0.0.1:8080`, with TLS per the mode above.
+- With the web panel: Bun at `/opt/openflux/bun`, the built SvelteKit app at `/opt/openflux/web`,
+  and `openflux-web.service` (`bun server.js` on `127.0.0.1:3000`, `CONTROLPLANE_UPSTREAM` holding
+  the controlplane address it forwards `/v1/*` to).
+- Nginx: `/admin/` → the web panel (or controlplane's embedded panel, when Bun was skipped),
+  `/v1/` + `/healthz` → controlplane on `127.0.0.1:8080`, all over TLS per the mode above. In
+  `http` mode without a web panel the split doesn't apply and controlplane answers directly.
 
 ## Honesty about the IP-certificate path
 
