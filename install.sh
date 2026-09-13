@@ -648,6 +648,14 @@ NGINX_INITIAL_TEMPLATE
 # sites-enabled, AlmaLinux/RHEL-family's directly in conf.d. Harmless if
 # whichever one doesn't apply to this OS isn't present.
 rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
+# A server first deployed before this script moved to conf.d wrote its own
+# vhost under sites-available+sites-enabled instead - a redeploy that just
+# adds the new conf.d/openflux.conf alongside it would leave both loaded at
+# once, fighting over the same :80/:443, without nginx -t necessarily
+# refusing to start (it just warns and picks one, likely by parse order).
+# Remove our own old-layout vhost specifically (not the whole directory -
+# never touch anything this script didn't create itself).
+rm -f /etc/nginx/sites-enabled/openflux /etc/nginx/sites-available/openflux
 nginx -t
 systemctl reload nginx
 
