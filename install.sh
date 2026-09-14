@@ -402,12 +402,23 @@ fi
 if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     log "Building the SvelteKit web panel"
     WEB_DIR="$INSTALL_ROOT/web"
+    # node_modules comes along too, not just build/ + server.js: the
+    # adapter-node output in build/handler.js requires @sveltejs/kit's own
+    # runtime helpers (import "@sveltejs/kit/node" and friends) resolvable
+    # from wherever `bun server.js` actually runs - which is $WEB_DIR, per
+    # the systemd unit's WorkingDirectory below, not this checkout. Without
+    # it the service fails immediately ("Cannot find module
+    # '@sveltejs/kit/node'") - reproduced live once Bun's own install
+    # started succeeding (see the BUN_INSTALL fix above); before that this
+    # step never even got this far, since the previous, unrelated bun
+    # install failure already fell back to WEB_PANEL=n.
     if ( cd "$SRC_DIR/controlplane/web" \
         && "$WEB_BUN" install \
         && "$WEB_BUN" run build \
         && mkdir -p "$WEB_DIR" \
         && cp -a build "$WEB_DIR/" \
-        && cp server.js "$WEB_DIR/" ); then
+        && cp -a node_modules "$WEB_DIR/" \
+        && cp package.json server.js "$WEB_DIR/" ); then
         log "Web panel built to $WEB_DIR"
     else
         warn "Web panel build failed - falling back to controlplane's embedded panel."
