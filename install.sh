@@ -21,6 +21,16 @@ BIN_DIR="$INSTALL_ROOT/bin"
 SRC_DIR="$INSTALL_ROOT/server"
 ENV_FILE="/etc/openflux/controlplane.env"
 NODEAGENT_ENV_FILE="/etc/openflux/nodeagent.env"
+# NOT under /etc/nginx/conf.d/: that directory's whole content is also
+# picked up by the OS's own default nginx.conf via a top-level `include
+# conf.d/*.conf;` inside `http {}` - this snippet is bare `location {}`
+# blocks meant ONLY to be `include`d from inside a `server {}` (see the
+# two vhost templates below), and `location` outside a `server`/`location`
+# block is a syntax error ("not allowed here"). Keeping it under
+# /etc/openflux (nginx never scans that directory) means it's reachable
+# exactly once, through the explicit `include` line, on every distro this
+# script supports.
+NGINX_LOCATIONS_FILE="/etc/openflux/nginx-locations.conf"
 SERVICE_NAME="openflux-controlplane"
 NODEAGENT_SERVICE_NAME="openflux-nodeagent"
 WEB_SERVICE_NAME="openflux-web"
@@ -368,7 +378,14 @@ if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     WEB_BUN="$(command -v bun || true)"
     if [ -z "$WEB_BUN" ]; then
         BUN_INSTALL_DIR="$INSTALL_ROOT/bun"
-        if BUN_INSTALL="$BUN_INSTALL_DIR" curl -fsSL https://bun.sh/install | bash; then
+        # A zero exit from the installer isn't proof the binary landed where
+        # BUN_INSTALL told it to (seen live: it exited 0 without creating
+        # bin/bun at all) - checked explicitly instead of trusting the exit
+        # code alone, so a broken install fails HERE with a clear warning
+        # rather than surfacing later as a raw "No such file or directory"
+        # from the next step trying to exec a binary that was never there.
+        if BUN_INSTALL="$BUN_INSTALL_DIR" curl -fsSL https://bun.sh/install | bash &&
+            [ -x "$BUN_INSTALL_DIR/bin/bun" ]; then
             WEB_BUN="$BUN_INSTALL_DIR/bin/bun"
         else
             warn "Bun install failed - falling back to controlplane's embedded panel."
@@ -605,8 +622,9 @@ mkdir -p /var/www/certbot /etc/nginx/conf.d
 # it, everything lands on controlplane, which still serves its embedded
 # panel at /admin/ on its own.
 write_web_locations() {
+    mkdir -p "$(dirname "$NGINX_LOCATIONS_FILE")"
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
-        cat > /etc/nginx/conf.d/openflux-locations.conf <<'WEB_LOCS'
+        cat > "$NGINX_LOCATIONS_FILE" <<'WEB_LOCS'
     location /healthz {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
@@ -633,7 +651,7 @@ write_web_locations() {
     }
 WEB_LOCS
     else
-        cat > /etc/nginx/conf.d/openflux-locations.conf <<'WEB_LOCS'
+        cat > "$NGINX_LOCATIONS_FILE" <<'WEB_LOCS'
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
@@ -651,7 +669,7 @@ write_web_locations
 # sites-available at all) and that AlmaLinux/RHEL-family's nginx package
 # never uses in the first place - conf.d is the one layout every nginx
 # package here actually includes from its default nginx.conf.
-sed "s/__SERVER_NAME__/$SERVER_NAME/g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/conf.d/openflux.conf"
+sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" -e "s#__NGINX_LOCATIONS_FILE__#$NGINX_LOCATIONS_FILE#g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/conf.d/openflux.conf"
 # Written by install.sh. HTTP-only reverse proxy in front of the control
 # plane services, also serving Let's Encrypt's HTTP-01 challenge from
 # /var/www/certbot - obtain_tls below needs that reachable before it runs.
@@ -667,7 +685,7 @@ server {
         root /var/www/certbot;
     }
 
-    include /etc/nginx/conf.d/openflux-locations.conf;
+    include __NGINX_LOCATIONS_FILE__;
 }
 NGINX_INITIAL_TEMPLATE
 # Both are stock default vhosts that would otherwise fight ours over
@@ -701,7 +719,8 @@ write_https_nginx_config() {
         -e "s#__CERT_PATH__#$cert#g" \
         -e "s#__KEY_PATH__#$key#g" \
         -e "s/__HTTPS_PORT__/$HTTPS_PORT/g" \
-        -e "s/__REDIRECT_PORT_SUFFIX__/$redirect_port_suffix/g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/conf.d/openflux.conf
+        -e "s/__REDIRECT_PORT_SUFFIX__/$redirect_port_suffix/g" \
+        -e "s#__NGINX_LOCATIONS_FILE__#$NGINX_LOCATIONS_FILE#g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/conf.d/openflux.conf
 server {
     listen 80;
     listen [::]:80;
@@ -724,7 +743,7 @@ server {
     ssl_certificate __CERT_PATH__;
     ssl_certificate_key __KEY_PATH__;
 
-    include /etc/nginx/conf.d/openflux-locations.conf;
+    include __NGINX_LOCATIONS_FILE__;
 }
 NGINX_HTTPS_TEMPLATE
     nginx -t
