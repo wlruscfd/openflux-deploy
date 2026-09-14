@@ -104,12 +104,23 @@ ask() {
     if [ -n "${!__var:-}" ]; then
         return
     fi
+    # Prompt text is written to /dev/tty by hand, then `read` (no -p) pulls
+    # from the same fd - NOT `read -p ... < /dev/tty`. bash's own -p only
+    # writes the prompt when IT decides fd 0 is a terminal, and empirically,
+    # under `curl | sudo bash`, that check doesn't see the /dev/tty this
+    # redirects onto: the read itself still blocks on real keyboard input,
+    # but the prompt text never appears, so a human sees a silently frozen
+    # script and mashes keys blind - a stray space then LOOKS like Enter but
+    # isn't empty, so $__default below never kicks in and becomes this
+    # setting's literal value instead. Printing it ourselves has no such
+    # condition to get wrong.
     if [ -n "$__default" ]; then
-        read -r -p "$__prompt [$__default]: " __reply < /dev/tty 2>/dev/null || true
-        __reply="${__reply:-$__default}"
+        printf '%s [%s]: ' "$__prompt" "$__default" > /dev/tty 2>/dev/null || true
     else
-        read -r -p "$__prompt: " __reply < /dev/tty 2>/dev/null || true
+        printf '%s: ' "$__prompt" > /dev/tty 2>/dev/null || true
     fi
+    read -r __reply < /dev/tty 2>/dev/null || true
+    [ -n "$__default" ] && __reply="${__reply:-$__default}"
     printf -v "$__var" '%s' "$__reply"
 }
 
@@ -118,8 +129,10 @@ ask_secret() {
     if [ -n "${!__var:-}" ]; then
         return
     fi
-    read -r -s -p "$__prompt (leave blank to auto-generate): " __reply < /dev/tty 2>/dev/null || true
-    echo
+    # Same hand-written-prompt fix as ask() above - see its comment.
+    printf '%s (leave blank to auto-generate): ' "$__prompt" > /dev/tty 2>/dev/null || true
+    read -r -s __reply < /dev/tty 2>/dev/null || true
+    echo > /dev/tty 2>/dev/null || true
     printf -v "$__var" '%s' "$__reply"
 }
 
