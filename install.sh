@@ -378,13 +378,19 @@ if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     WEB_BUN="$(command -v bun || true)"
     if [ -z "$WEB_BUN" ]; then
         BUN_INSTALL_DIR="$INSTALL_ROOT/bun"
-        # A zero exit from the installer isn't proof the binary landed where
-        # BUN_INSTALL told it to (seen live: it exited 0 without creating
-        # bin/bun at all) - checked explicitly instead of trusting the exit
-        # code alone, so a broken install fails HERE with a clear warning
-        # rather than surfacing later as a raw "No such file or directory"
-        # from the next step trying to exec a binary that was never there.
-        if BUN_INSTALL="$BUN_INSTALL_DIR" curl -fsSL https://bun.sh/install | bash &&
+        # `VAR=x cmd1 | cmd2` only sets VAR for cmd1 - each stage of a
+        # pipeline is its own process, and bun's install script runs as the
+        # `bash` on the RIGHT of the pipe, which never saw BUN_INSTALL this
+        # way (confirmed live: it installed to the default ~/.bun instead).
+        # `export` inside a `(...)` subshell scopes it to just this pipeline
+        # without leaking BUN_INSTALL into the rest of this script's
+        # environment. A zero exit still isn't proof the binary landed
+        # (seen live too, separately) - checked explicitly instead of
+        # trusting the exit code alone, so a broken install fails HERE with
+        # a clear warning rather than surfacing later as a raw "No such
+        # file or directory" from the next step trying to exec a binary
+        # that was never there.
+        if (export BUN_INSTALL="$BUN_INSTALL_DIR"; curl -fsSL https://bun.sh/install | bash) &&
             [ -x "$BUN_INSTALL_DIR/bin/bun" ]; then
             WEB_BUN="$BUN_INSTALL_DIR/bin/bun"
         else
@@ -701,6 +707,14 @@ rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 # Remove our own old-layout vhost specifically (not the whole directory -
 # never touch anything this script didn't create itself).
 rm -f /etc/nginx/sites-enabled/openflux /etc/nginx/sites-available/openflux
+# Same deal for THIS script's own now-obsolete locations-snippet path
+# (moved to $NGINX_LOCATIONS_FILE - see that constant's comment): a
+# leftover from before that move sits directly under conf.d/, where
+# nginx's default nginx.conf glob-includes it regardless of whether this
+# script still writes there, and fails nginx -t exactly the same way a
+# fresh run without this cleanup would - the newer script alone can't fix
+# a server a previous run of it already broke.
+rm -f /etc/nginx/conf.d/openflux-locations.conf
 nginx -t
 systemctl reload nginx
 
