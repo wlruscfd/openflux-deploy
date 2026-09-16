@@ -277,7 +277,11 @@ else
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
         dnf install -y epel-release
-        dnf install -y git curl postgresql-server postgresql postgresql-contrib nginx snapd openssl iptables-nft unzip
+        # policycoreutils-python-utils provides semanage/restorecon, used
+        # below to label $NGINX_LOCATIONS_FILE - not guaranteed present on a
+        # minimal AlmaLinux/RHEL-family image, and without it SELinux blocks
+        # nginx from ever reading that file (see the labeling step's comment).
+        dnf install -y git curl postgresql-server postgresql postgresql-contrib nginx snapd openssl iptables-nft unzip policycoreutils-python-utils
         # snapd needs its socket unit enabled and the classic-snap symlink
         # created by hand on RHEL-family - Debian's snapd package does both
         # itself as part of installation.
@@ -375,9 +379,28 @@ fi
 WEB_BUN="${WEB_BUN:-}"
 if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     log "Setting up Bun (for the SvelteKit web panel)"
-    WEB_BUN="$(command -v bun || true)"
+    BUN_INSTALL_DIR="$INSTALL_ROOT/bun"
+    # Prefer our own pinned install first - always reachable from the
+    # web-panel systemd unit's ProtectHome=true sandbox below, unlike
+    # anything a bare `command -v bun` might turn up.
+    if [ -x "$BUN_INSTALL_DIR/bin/bun" ]; then
+        WEB_BUN="$BUN_INSTALL_DIR/bin/bun"
+    else
+        WEB_BUN="$(command -v bun || true)"
+        case "$WEB_BUN" in
+            /root/*|/home/*)
+                # ProtectHome=true makes /root and /home invisible inside the
+                # web-panel service's sandbox - a bun living there (e.g. a
+                # stray leftover from an older, pre-fix run of this script
+                # that installed to the default ~/.bun, or an operator's own
+                # interactive login-shell install) would pass this check but
+                # fail at actual service start with the binary simply gone.
+                # Treat it as absent and install our own pinned copy instead.
+                WEB_BUN=""
+                ;;
+        esac
+    fi
     if [ -z "$WEB_BUN" ]; then
-        BUN_INSTALL_DIR="$INSTALL_ROOT/bun"
         # `VAR=x cmd1 | cmd2` only sets VAR for cmd1 - each stage of a
         # pipeline is its own process, and bun's install script runs as the
         # `bash` on the RIGHT of the pipe, which never saw BUN_INSTALL this
@@ -412,16 +435,43 @@ if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     # started succeeding (see the BUN_INSTALL fix above); before that this
     # step never even got this far, since the previous, unrelated bun
     # install failure already fell back to WEB_PANEL=n.
+    # Staged into $WEB_DIR.new and swapped into place only once every step
+    # below succeeds - building straight into the live $WEB_DIR would
+    # overwrite its (small) build/ output before the much larger
+    # node_modules copy even starts; a failure partway through (disk full on
+    # node_modules, most commonly) used to leave a live $WEB_DIR with a
+    # freshly-built build/ paired with a stale node_modules, which keeps
+    # working only until the next unrelated restart - then reproduces
+    # exactly the "Cannot find module '@sveltejs/kit/node'" crash this
+    # already fixed once. `mv` within $INSTALL_ROOT is a same-filesystem
+    # rename, so the swap itself is effectively instant. Staging fresh each
+    # time (rather than `cp -a` merging into an existing $WEB_DIR) also means
+    # a dependency removed from package.json actually disappears on redeploy
+    # instead of lingering under node_modules indefinitely.
+    WEB_DIR_NEW="$WEB_DIR.new"
+    WEB_DIR_OLD="$WEB_DIR.old"
+    rm -rf "$WEB_DIR_NEW"
     if ( cd "$SRC_DIR/controlplane/web" \
         && "$WEB_BUN" install \
         && "$WEB_BUN" run build \
-        && mkdir -p "$WEB_DIR" \
-        && cp -a build "$WEB_DIR/" \
-        && cp -a node_modules "$WEB_DIR/" \
-        && cp package.json server.js "$WEB_DIR/" ); then
+        && mkdir -p "$WEB_DIR_NEW" \
+        && cp -a build "$WEB_DIR_NEW/" \
+        && cp -a node_modules "$WEB_DIR_NEW/" \
+        && cp package.json server.js "$WEB_DIR_NEW/" ); then
+        rm -rf "$WEB_DIR_OLD"
+        # Not `[ -d "$WEB_DIR" ] && mv ...`: under `set -e`, that whole
+        # statement's exit status is the test's when it's false (a fresh
+        # install, $WEB_DIR not existing yet) - the compound command's own
+        # non-zero status would then abort the script right here.
+        if [ -d "$WEB_DIR" ]; then
+            mv "$WEB_DIR" "$WEB_DIR_OLD"
+        fi
+        mv "$WEB_DIR_NEW" "$WEB_DIR"
+        rm -rf "$WEB_DIR_OLD"
         log "Web panel built to $WEB_DIR"
     else
         warn "Web panel build failed - falling back to controlplane's embedded panel."
+        rm -rf "$WEB_DIR_NEW"
         WEB_PANEL="n"
     fi
 fi
@@ -680,6 +730,20 @@ WEB_LOCS
     fi
 }
 write_web_locations
+# $NGINX_LOCATIONS_FILE sits outside nginx's own config tree on purpose (see
+# NGINX_LOCATIONS_FILE's doc comment on why), so on an SELinux-enforcing
+# RHEL-family host it gets the generic etc_t context instead of the
+# httpd_config_t nginx's own package pre-labels /etc/nginx/conf.d/* with -
+# and httpd_t (nginx's SELinux domain) is denied open() on etc_t, so the
+# `nginx -t` below would otherwise fail with "Permission denied" reading this
+# file on every enforcing-SELinux host, not just as a rare edge case. `-a`
+# adds a fresh fcontext rule; on a re-run it already exists, so fall back to
+# `-m` (modify) instead of failing.
+if [ "$OS_FAMILY" = "rhel" ] && command -v semanage >/dev/null 2>&1; then
+    semanage fcontext -a -t httpd_config_t "$NGINX_LOCATIONS_FILE" 2>/dev/null \
+        || semanage fcontext -m -t httpd_config_t "$NGINX_LOCATIONS_FILE" 2>/dev/null || true
+    command -v restorecon >/dev/null 2>&1 && restorecon "$NGINX_LOCATIONS_FILE" 2>/dev/null || true
+fi
 # conf.d/*.conf, not sites-available+sites-enabled: the latter is a
 # Debian/Ubuntu packaging convention that not every Debian derivative
 # actually ships (Astra Linux's nginx package doesn't create
