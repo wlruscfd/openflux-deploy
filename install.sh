@@ -45,8 +45,7 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "Run this as root (sudo bash install.sh)."
 
 # OS_FAMILY drives every package-manager-specific step below (package names,
-# Postgres init, firewall, SELinux) - detected once here rather than
-# re-checking `command -v` at each call site.
+# Postgres init, firewall, SELinux).
 if command -v apt-get >/dev/null 2>&1; then
     OS_FAMILY="debian"
 elif command -v dnf >/dev/null 2>&1; then
@@ -70,7 +69,6 @@ read_existing_env() {
     grep "^$var=" "$file" 2>/dev/null | tail -n1 | cut -d= -f2- || true
 }
 
-# ---------------------------------------------------------------------------
 # $ENV_FILE only exists once a previous run has already gotten past the
 # Postgres setup step (see below) - so if it's here, this is a redeploy, and
 # there's an existing database worth protecting before touching anything.
@@ -146,7 +144,6 @@ ask_secret() {
     printf -v "$__var" '%s' "$__reply"
 }
 
-# ---------------------------------------------------------------------------
 log "OpenFlux control-plane setup"
 echo "Answer the questions below; press Enter to accept the default in [brackets]."
 
@@ -241,7 +238,6 @@ if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
     ask RUN_NODE_HERE "Also run this exit node on this same server? (y/n)" "y"
 fi
 
-# ---------------------------------------------------------------------------
 # http mode skips Nginx and certbot entirely - controlplane is reachable
 # directly on plain HTTP with nothing in front of it, so there's no reverse
 # proxy or certificate to install in the first place (see the
@@ -314,7 +310,6 @@ if [ "$TLS_MODE" != "http" ]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
 log "Installing Go $GO_VERSION (apt's Go is usually too old for this project)"
 if ! command -v /usr/local/go/bin/go >/dev/null 2>&1 || \
    ! /usr/local/go/bin/go version | grep -q "go$GO_VERSION"; then
@@ -342,7 +337,6 @@ if ! command -v /usr/local/go/bin/go >/dev/null 2>&1 || \
 fi
 export PATH="/usr/local/go/bin:$PATH"
 
-# ---------------------------------------------------------------------------
 log "Fetching openflux-server ($GIT_REF)"
 # Every run after the first sees $SRC_DIR owned by $SYSTEM_USER (the chown
 # below applies to the whole $INSTALL_ROOT, .git included), while this
@@ -476,12 +470,10 @@ if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
 log "Setting up the openflux system user"
 id -u "$SYSTEM_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$SYSTEM_USER"
 chown -R "$SYSTEM_USER:$SYSTEM_USER" "$INSTALL_ROOT"
 
-# ---------------------------------------------------------------------------
 log "Setting up Postgres"
 if [ "$OS_FAMILY" = "rhel" ]; then
     # Debian's postgresql package initializes and starts its own cluster on
@@ -526,7 +518,6 @@ fi
 
 DATABASE_URL="postgres://$DB_USER:$DB_PASSWORD@127.0.0.1:5432/$DB_NAME?sslmode=disable"
 
-# ---------------------------------------------------------------------------
 log "Writing $ENV_FILE"
 mkdir -p "$(dirname "$ENV_FILE")"
 # In ip/domain mode Nginx fronts both services on the same HTTPS origin, so
@@ -577,7 +568,6 @@ EOF
     chmod 600 "$WEB_ENV_FILE"
 fi
 
-# ---------------------------------------------------------------------------
 # Templates below are inlined (not read from a sibling templates/ directory)
 # because both documented ways of running this script - curl -o install.sh
 # && bash install.sh, and the Android app's SSH deployer (see
@@ -661,7 +651,6 @@ for _ in $(seq 1 20); do
 done
 curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 || die "controlplane did not start - check: journalctl -u $SERVICE_NAME"
 
-# ---------------------------------------------------------------------------
 # http mode has no Nginx installed at all (see the package-install step
 # above) - controlplane is reached directly on its own plain-HTTP port, so
 # there's nothing to reverse-proxy and no certificate to request.
@@ -793,7 +782,6 @@ rm -f /etc/nginx/conf.d/openflux-locations.conf
 nginx -t
 systemctl reload nginx
 
-# ---------------------------------------------------------------------------
 # Writes the HTTPS vhost for an already-obtained cert/key pair and reloads
 # Nginx. Used for IP-mode certificates and the self-signed fallback - NOT
 # for domain mode, where certbot's own --nginx plugin edits Nginx itself
@@ -904,7 +892,6 @@ else
     log "http mode: skipping Nginx/TLS - controlplane is reachable directly on $CONTROLPLANE_PUBLIC_URL"
 fi
 
-# ---------------------------------------------------------------------------
 # A caller can hand NODE_TOKEN in directly (matching every other
 # ask()-skippable variable in this script) to recover a node whose token
 # neither the API nor $NODEAGENT_ENV_FILE can produce anymore - see the
@@ -947,7 +934,6 @@ if [ "${REGISTER_NODE:-n}" = "y" ] || [ "${REGISTER_NODE:-n}" = "Y" ]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
 NODE_RUNNING_HERE="n"
 if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ -n "$NODE_TOKEN" ]; then
     log "Setting up the exit node on this server"
@@ -1008,7 +994,6 @@ NODEAGENT_SERVICE_TEMPLATE
     fi
 fi
 
-# ---------------------------------------------------------------------------
 PANEL_URL="$CONTROLPLANE_PUBLIC_URL/admin/"
 log "Done"
 cat <<SUMMARY
