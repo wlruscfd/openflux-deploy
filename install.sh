@@ -718,9 +718,13 @@ if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ 
         iptables -A OUTPUT -p icmp --icmp-type port-unreachable -j DROP
 
     mkdir -p "$(dirname "$NODEAGENT_ENV_FILE")"
+    # Auto-recovered like CONTROLPLANE_PORT, so tuning this once (env var or by hand in the file) survives a redeploy.
+    NODE_PORT_RANGE_SIZE="${NODE_PORT_RANGE_SIZE:-$(read_existing_env NODEAGENT_PORT_RANGE_SIZE "$NODEAGENT_ENV_FILE")}"
+    NODE_PORT_RANGE_SIZE="${NODE_PORT_RANGE_SIZE:-96}"
     cat > "$NODEAGENT_ENV_FILE" <<EOF
 NODEAGENT_CONTROL_URL=http://127.0.0.1:$CONTROLPLANE_PORT
 NODEAGENT_TOKEN=$NODE_TOKEN
+NODEAGENT_PORT_RANGE_SIZE=$NODE_PORT_RANGE_SIZE
 EOF
     chmod 600 "$NODEAGENT_ENV_FILE"
 
@@ -733,7 +737,7 @@ Wants=openflux-controlplane.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/openflux/nodeagent.env
-ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN}
+ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN} --port-range-size ${NODEAGENT_PORT_RANGE_SIZE}
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=524288

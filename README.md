@@ -42,6 +42,12 @@ It will ask for:
   the panel fails to build, the script degrades to the embedded panel and says so.
 - Whether to register a first exit node right away.
 
+If that node runs here (`RUN_NODE_HERE`, raw mode), its outbound-ports-per-key setting defaults to
+96 and is set via the `NODE_PORT_RANGE_SIZE` env var - not an interactive prompt, and remembered
+across redeploys the same way `CONTROLPLANE_PORT` is. Lower it to fit more keys on this one node;
+raise it if a single key's traffic needs more than ~96 simultaneous outbound connections at once
+(observed in practice: Telegram opens quite a few while loading media in an active chat).
+
 At the end it prints the panel URL, the admin token (**save it - it's stored hashed and can't be
 recovered from the server afterwards**), and, if you registered one, the first exit node's token
 and the exact flags to hand to whoever runs that exit node:
