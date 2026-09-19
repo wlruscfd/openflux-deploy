@@ -31,6 +31,10 @@ It will ask for:
   at `https://<your-domain-or-ip>/admin/` afterwards.
 - For `domain`/`ip` mode: which HTTPS port to use (default `443`) - only worth changing if
   something else on the server already owns it.
+- For `domain`/`ip` mode: whether to reserve port 80 for another service on this machine (default
+  **no** - normal Let's Encrypt issuance/renewal, which needs port 80 reachable). Say "y" only if
+  something else on this server needs port 80 for itself; this skips Let's Encrypt entirely and uses
+  a self-signed certificate on the HTTPS port only, with nginx never listening on 80 at all.
 - Whether to install the full **SvelteKit web panel** (requires Bun; default yes): it serves the
   dashboard at `/admin/` behind Nginx next to controlplane's `/v1/*`. Say "n" and you get the
   original, self-contained panel that's embedded inside the controlplane binary itself (still
@@ -62,9 +66,12 @@ none of this applies to it.
 ## Non-interactive / automated use
 
 Every prompt is skipped if its variable is already set in the environment (`REPO_URL`, `GIT_REF`,
-`TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `HTTPS_PORT`, `ADMIN_TOKEN`, `DB_PASSWORD`,
-`REGISTER_NODE`, `NODE_NAME`, `NODE_MAX_KEYS`, `WEB_PANEL` - the exact names used inside the
-script), so it can be driven without a human at the keyboard:
+`TLS_MODE`, `DOMAIN`, `LE_EMAIL`, `SERVER_IP`, `HTTPS_PORT`, `RESERVE_PORT_80`, `ADMIN_TOKEN`,
+`DB_PASSWORD`, `REGISTER_NODE`, `NODE_NAME`, `NODE_MAX_KEYS`, `WEB_PANEL` - the exact names used
+inside the script), so it can be driven without a human at the keyboard. `RESERVE_PORT_80` (default
+`n`, `domain`/`ip` modes only) - set to `y` to skip Let's Encrypt entirely and use a self-signed
+certificate with no port-80 listener at all, so port 80 stays free for another service on the same
+machine:
 
 ```bash
 REPO_URL=https://github.com/wlruscfd/openflux-server.git GIT_REF=main \

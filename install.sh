@@ -89,10 +89,11 @@ ask GIT_REF "Git branch/tag to deploy" "main"
 
 echo
 echo "Before you continue: your VPS/cloud firewall (security group) needs to allow"
-echo "inbound TCP 443 (plus 80, briefly, for Let's Encrypt) for 'domain'/'ip' mode below -"
-echo "443 is just the default and can be changed in a moment if it's already taken -"
-echo "or TCP 8080 for 'http' mode - whichever you pick, that port has to be reachable"
-echo "from the internet or nothing past this point will actually be usable."
+echo "inbound TCP 443 for 'domain'/'ip' mode below (443 is just the default and can be"
+echo "changed in a moment if it's already taken; plus TCP 80 too if you want normal"
+echo "Let's Encrypt renewal instead of the default self-signed cert - see the next"
+echo "few questions), or TCP 8080 for 'http' mode - whichever you pick, that port has"
+echo "to be reachable from the internet or nothing past this point will actually work."
 echo
 
 ask TLS_MODE "TLS mode - 'domain', 'ip', or 'http' (no panel/TLS - manage only via the app)" "ip"
@@ -123,6 +124,10 @@ else
 fi
 HTTPS_PORT="${HTTPS_PORT:-443}"
 
+if [ "$TLS_MODE" != "http" ]; then
+    ask RESERVE_PORT_80 "Reserve port 80 for another service on this machine? Skips Let's Encrypt entirely (self-signed cert on \$HTTPS_PORT only, no auto-renewal) (y/n)" "n"
+fi
+
 ask WEB_PANEL "Install the SvelteKit web panel (Bun)? (y/n)" "y"
 
 # AlmaLinux/RHEL-family ships firewalld active by default (Debian/Ubuntu doesn't) - without this it'd still block everything.
@@ -133,6 +138,8 @@ if [ "$OS_FAMILY" = "rhel" ] && command -v firewall-cmd >/dev/null 2>&1 && syste
             y|Y) firewall-cmd --permanent --add-port=3000/tcp ;;
             *)   firewall-cmd --permanent --add-port=8080/tcp ;;
         esac
+    elif [ "${RESERVE_PORT_80:-n}" = "y" ] || [ "${RESERVE_PORT_80:-n}" = "Y" ]; then
+        firewall-cmd --permanent --add-port="$HTTPS_PORT/tcp"
     else
         firewall-cmd --permanent --add-service=http --add-port="$HTTPS_PORT/tcp"
     fi
@@ -180,7 +187,7 @@ else
     fi
 fi
 
-if [ "$TLS_MODE" != "http" ]; then
+if [ "$TLS_MODE" != "http" ] && [ "${RESERVE_PORT_80:-n}" != "y" ] && [ "${RESERVE_PORT_80:-n}" != "Y" ]; then
     # Distro-packaged certbot is too old for IP-address certs (needs 5.3+) - certbot's own snap stays current.
     log "Installing certbot via snap"
     if command -v snap >/dev/null 2>&1 &&
@@ -512,38 +519,40 @@ if [ "$OS_FAMILY" = "rhel" ] && command -v semanage >/dev/null 2>&1; then
         || semanage fcontext -m -t httpd_config_t "$NGINX_LOCATIONS_FILE" 2>/dev/null || true
     command -v restorecon >/dev/null 2>&1 && restorecon "$NGINX_LOCATIONS_FILE" 2>/dev/null || true
 fi
-sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" -e "s#__NGINX_LOCATIONS_FILE__#$NGINX_LOCATIONS_FILE#g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/conf.d/openflux.conf"
-# Written by install.sh.
-server {
-    listen 80;
-    listen [::]:80;
-    server_name __SERVER_NAME__;
-
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-    }
-
-    include __NGINX_LOCATIONS_FILE__;
-}
-NGINX_INITIAL_TEMPLATE
-# Removes stock default vhosts and this script's own pre-conf.d leftovers, which would otherwise fight this one over :80.
+# Removes stock default vhosts and this script's own pre-conf.d leftovers - needed even when reserving port 80, since nginx's own untouched default vhost also listens on it.
 rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 rm -f /etc/nginx/sites-enabled/openflux /etc/nginx/sites-available/openflux
 rm -f /etc/nginx/conf.d/openflux-locations.conf
-nginx -t
-systemctl reload nginx
 
-# Used for IP-mode certs and the self-signed fallback; domain mode's certbot --nginx plugin edits Nginx itself instead.
+# Used for IP-mode certs and the self-signed fallback; domain mode's certbot --nginx plugin edits Nginx itself instead. Drops the port-80 block entirely when RESERVE_PORT_80 claims it for another service.
 write_https_nginx_config() {
     local cert="$1" key="$2"
     local redirect_port_suffix=""
     [ "$HTTPS_PORT" = "443" ] || redirect_port_suffix=":$HTTPS_PORT"
-    sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" \
-        -e "s#__CERT_PATH__#$cert#g" \
-        -e "s#__KEY_PATH__#$key#g" \
-        -e "s/__HTTPS_PORT__/$HTTPS_PORT/g" \
-        -e "s/__REDIRECT_PORT_SUFFIX__/$redirect_port_suffix/g" \
-        -e "s#__NGINX_LOCATIONS_FILE__#$NGINX_LOCATIONS_FILE#g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/conf.d/openflux.conf
+    if [ "${RESERVE_PORT_80:-n}" = "y" ] || [ "${RESERVE_PORT_80:-n}" = "Y" ]; then
+        sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" \
+            -e "s#__CERT_PATH__#$cert#g" \
+            -e "s#__KEY_PATH__#$key#g" \
+            -e "s/__HTTPS_PORT__/$HTTPS_PORT/g" \
+            -e "s#__NGINX_LOCATIONS_FILE__#$NGINX_LOCATIONS_FILE#g" <<'NGINX_HTTPS_ONLY_TEMPLATE' > /etc/nginx/conf.d/openflux.conf
+server {
+    listen __HTTPS_PORT__ ssl;
+    listen [::]:__HTTPS_PORT__ ssl;
+    server_name __SERVER_NAME__;
+
+    ssl_certificate __CERT_PATH__;
+    ssl_certificate_key __KEY_PATH__;
+
+    include __NGINX_LOCATIONS_FILE__;
+}
+NGINX_HTTPS_ONLY_TEMPLATE
+    else
+        sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" \
+            -e "s#__CERT_PATH__#$cert#g" \
+            -e "s#__KEY_PATH__#$key#g" \
+            -e "s/__HTTPS_PORT__/$HTTPS_PORT/g" \
+            -e "s/__REDIRECT_PORT_SUFFIX__/$redirect_port_suffix/g" \
+            -e "s#__NGINX_LOCATIONS_FILE__#$NGINX_LOCATIONS_FILE#g" <<'NGINX_HTTPS_TEMPLATE' > /etc/nginx/conf.d/openflux.conf
 server {
     listen 80;
     listen [::]:80;
@@ -569,9 +578,42 @@ server {
     include __NGINX_LOCATIONS_FILE__;
 }
 NGINX_HTTPS_TEMPLATE
+    fi
     nginx -t
     systemctl reload nginx
 }
+
+if [ "${RESERVE_PORT_80:-n}" = "y" ] || [ "${RESERVE_PORT_80:-n}" = "Y" ]; then
+    log "Reserving port 80 for another service - using a self-signed certificate, no Let's Encrypt"
+    mkdir -p /etc/openflux/tls
+    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
+        -keyout /etc/openflux/tls/selfsigned.key \
+        -out /etc/openflux/tls/selfsigned.crt \
+        -subj "/CN=$SERVER_NAME" \
+        -addext "subjectAltName=IP:$SERVER_NAME" 2>/dev/null || \
+    openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
+        -keyout /etc/openflux/tls/selfsigned.key \
+        -out /etc/openflux/tls/selfsigned.crt \
+        -subj "/CN=$SERVER_NAME"
+    write_https_nginx_config /etc/openflux/tls/selfsigned.crt /etc/openflux/tls/selfsigned.key
+else
+
+sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" -e "s#__NGINX_LOCATIONS_FILE__#$NGINX_LOCATIONS_FILE#g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/conf.d/openflux.conf"
+# Written by install.sh.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __SERVER_NAME__;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    include __NGINX_LOCATIONS_FILE__;
+}
+NGINX_INITIAL_TEMPLATE
+nginx -t
+systemctl reload nginx
 
 # Domain mode uses certbot's --nginx plugin; IP mode uses its short-lived-IP-cert capability, hand-installed via write_https_nginx_config.
 obtain_tls() {
@@ -618,6 +660,8 @@ else
         -out /etc/openflux/tls/selfsigned.crt \
         -subj "/CN=$SERVER_NAME"
     write_https_nginx_config /etc/openflux/tls/selfsigned.crt /etc/openflux/tls/selfsigned.key
+fi
+
 fi
 
 else
