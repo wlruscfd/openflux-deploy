@@ -710,9 +710,10 @@ NODE_RUNNING_HERE="n"
 if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ -n "$NODE_TOKEN" ]; then
     log "Setting up the exit node on this server"
 
-    # The kernel would otherwise RST/ICMP-unreachable the raw socket's own TCP/UDP traffic, since it owns no socket for it.
-    iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP 2>/dev/null || \
-        iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+    # The kernel would otherwise RST/ICMP-unreachable the raw socket's own TCP/UDP traffic, since it owns no socket for it - but an unscoped DROP here also silently EPERMs the raw socket's OWN legitimate RSTs (0x2547 mark set in rawsocket_linux.go), leaving real peers thinking a torn-down connection is still open. Drop the old unscoped rule from before this fix existed, if present, so it can't shadow the new one.
+    iptables -D OUTPUT -p tcp --tcp-flags RST RST -j DROP 2>/dev/null || true
+    iptables -C OUTPUT -p tcp --tcp-flags RST RST -m mark ! --mark 0x2547 -j DROP 2>/dev/null || \
+        iptables -A OUTPUT -p tcp --tcp-flags RST RST -m mark ! --mark 0x2547 -j DROP
 
     iptables -C OUTPUT -p icmp --icmp-type port-unreachable -j DROP 2>/dev/null || \
         iptables -A OUTPUT -p icmp --icmp-type port-unreachable -j DROP
