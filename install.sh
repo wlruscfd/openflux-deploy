@@ -170,7 +170,7 @@ TOKEN_PEPPER="$(read_existing_env CONTROLPLANE_TOKEN_PEPPER)"
 ask REGISTER_NODE "Register a first exit node now? (y/n)" "y"
 if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
     ask NODE_NAME "First node's name" "node-1"
-    ask NODE_MAX_KEYS "First node's max keys" "500"
+    ask NODE_MAX_KEYS "First node's max keys (999999 = no real limit)" "999999"
     ask RUN_NODE_HERE "Also run this exit node on this same server? (y/n)" "y"
 fi
 
