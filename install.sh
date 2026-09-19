@@ -1,18 +1,5 @@
 #!/bin/bash
-# OpenFlux control-plane auto-deployer.
-#
-# Run this directly ON the target VPS, as root (or via sudo):
-#   curl -fsSL https://raw.githubusercontent.com/wlruscfd/openflux-deploy/main/install.sh -o install.sh
-#   sudo bash install.sh
-#
-# It asks a handful of questions, then installs Postgres, Nginx, Go, builds
-# and runs controlplane (see ../server/controlplane), registers and - by
-# default - also runs a first exit node right here on this same server (see
-# ../main.go and RUN_NODE_HERE below; say "n" if you're pointing it at a
-# node running elsewhere instead), and puts the admin panel behind HTTPS.
-# Debian/Ubuntu (apt-get) and AlmaLinux/RHEL-family (dnf) - it exits early
-# with a clear message on anything else rather than doing the wrong thing
-# silently.
+# OpenFlux control-plane auto-deployer - run as root on the target VPS: curl -fsSL .../install.sh -o install.sh && sudo bash install.sh
 set -euo pipefail
 
 GO_VERSION="1.26.5"
@@ -21,15 +8,7 @@ BIN_DIR="$INSTALL_ROOT/bin"
 SRC_DIR="$INSTALL_ROOT/server"
 ENV_FILE="/etc/openflux/controlplane.env"
 NODEAGENT_ENV_FILE="/etc/openflux/nodeagent.env"
-# NOT under /etc/nginx/conf.d/: that directory's whole content is also
-# picked up by the OS's own default nginx.conf via a top-level `include
-# conf.d/*.conf;` inside `http {}` - this snippet is bare `location {}`
-# blocks meant ONLY to be `include`d from inside a `server {}` (see the
-# two vhost templates below), and `location` outside a `server`/`location`
-# block is a syntax error ("not allowed here"). Keeping it under
-# /etc/openflux (nginx never scans that directory) means it's reachable
-# exactly once, through the explicit `include` line, on every distro this
-# script supports.
+# Under /etc/openflux, not /etc/nginx/conf.d/ - a bare location{} block there is a syntax error outside server{}.
 NGINX_LOCATIONS_FILE="/etc/openflux/nginx-locations.conf"
 SERVICE_NAME="openflux-controlplane"
 NODEAGENT_SERVICE_NAME="openflux-nodeagent"
@@ -44,8 +23,6 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "Run this as root (sudo bash install.sh)."
 
-# OS_FAMILY drives every package-manager-specific step below (package names,
-# Postgres init, firewall, SELinux).
 if command -v apt-get >/dev/null 2>&1; then
     OS_FAMILY="debian"
 elif command -v dnf >/dev/null 2>&1; then
@@ -54,26 +31,14 @@ else
     die "This script only supports Debian/Ubuntu (apt-get) or AlmaLinux/RHEL-family (dnf) right now."
 fi
 
-# Reads VAR's value out of an already-written env file from a previous run,
-# if any - lets a redeploy fall back to what's already there instead of
-# generating a fresh value blind. Most critical for CONTROLPLANE_TOKEN_PEPPER
-# below: every key/node/ingest-token secret is stored hashed with it, so a
-# silently-regenerated pepper would make every one of them stop matching -
-# not lost data exactly, but unusable, which is just as bad. Also how a
-# redeploy recovers NODEAGENT_TOKEN (see $NODEAGENT_ENV_FILE below) - a node
-# token is exactly as one-way-hashed as any other, so once the node already
-# exists there is no fresh one to be had, only this saved copy.
+# Lets a redeploy reuse a value from a previous run (e.g. CONTROLPLANE_TOKEN_PEPPER) instead of generating a fresh one blind.
 read_existing_env() {
     local var="$1" file="${2:-$ENV_FILE}"
     [ -f "$file" ] || return 0
     grep "^$var=" "$file" 2>/dev/null | tail -n1 | cut -d= -f2- || true
 }
 
-# $ENV_FILE only exists once a previous run has already gotten past the
-# Postgres setup step (see below) - so if it's here, this is a redeploy, and
-# there's an existing database worth protecting before touching anything.
-# Cheap insurance: skipped entirely on a genuinely first install, where
-# there's nothing yet to back up.
+# Back up the DB before a redeploy touches anything; skipped on a first install, where there's nothing yet.
 if [ -f "$ENV_FILE" ]; then
     BACKUP_DIR="/opt/openflux/backups/$(date +%Y%m%d-%H%M%S)"
     log "Existing install detected - backing up to $BACKUP_DIR before redeploying"
@@ -89,39 +54,12 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 ask() {
-    # ask VAR "prompt" "default"
-    # Skips the prompt entirely if VAR is already set in the environment -
-    # this is what lets a caller (e.g. the Android app's SSH deployer)
-    # drive this script non-interactively by pre-exporting every variable
-    # it asks about, with zero changes to the interactive experience below.
-    #
-    # Reads from /dev/tty, not stdin: this script is meant to be run as
-    # `curl ... | sudo bash`, where fd 0 is the pipe carrying the script's
-    # own remaining bytes, not the keyboard - `read` on plain stdin there
-    # would consume the script's own source as "input" instead of ever
-    # reaching the terminal. /dev/tty is the actual controlling terminal
-    # regardless of what's on fd 0, so this is what a real human at a
-    # keyboard needs for prompts to work at all. Neither this script being
-    # saved to a file first (the older documented flow) nor a truly
-    # non-interactive caller (no controlling terminal at all, e.g. the
-    # app's SSH exec) is affected: /dev/tty is always the right thing to
-    # read in the first case, and simply fails to open in the second,
-    # exactly like reading a closed stdin would - `|| true` treats both the
-    # same and falls through to the default.
+    # ask VAR "prompt" "default" - skips the prompt if VAR is already set (lets a caller pre-export answers non-interactively).
     local __var="$1" __prompt="$2" __default="${3:-}" __reply
     if [ -n "${!__var:-}" ]; then
         return
     fi
-    # Prompt text is written to /dev/tty by hand, then `read` (no -p) pulls
-    # from the same fd - NOT `read -p ... < /dev/tty`. bash's own -p only
-    # writes the prompt when IT decides fd 0 is a terminal, and empirically,
-    # under `curl | sudo bash`, that check doesn't see the /dev/tty this
-    # redirects onto: the read itself still blocks on real keyboard input,
-    # but the prompt text never appears, so a human sees a silently frozen
-    # script and mashes keys blind - a stray space then LOOKS like Enter but
-    # isn't empty, so $__default below never kicks in and becomes this
-    # setting's literal value instead. Printing it ourselves has no such
-    # condition to get wrong.
+    # Reads from /dev/tty (curl|bash makes stdin the script itself) and prints the prompt by hand (bash's -p misdetects the tty here).
     if [ -n "$__default" ]; then
         printf '%s [%s]: ' "$__prompt" "$__default" > /dev/tty 2>/dev/null || true
     else
@@ -137,7 +75,6 @@ ask_secret() {
     if [ -n "${!__var:-}" ]; then
         return
     fi
-    # Same hand-written-prompt fix as ask() above - see its comment.
     printf '%s (leave blank to auto-generate): ' "$__prompt" > /dev/tty 2>/dev/null || true
     read -r -s __reply < /dev/tty 2>/dev/null || true
     echo > /dev/tty 2>/dev/null || true
@@ -184,32 +121,19 @@ else
     SERVER_NAME="$SERVER_IP"
     ask HTTPS_PORT "HTTPS port for the panel (change only if 443 is already used by something else on this server)" "443"
 fi
-# Referenced unconditionally below (nginx templates, CONTROLPLANE_PUBLIC_URL,
-# the firewall step) regardless of mode - defaulted here so http mode (which
-# never touches it) doesn't need special-casing at every use site.
 HTTPS_PORT="${HTTPS_PORT:-443}"
 
 ask WEB_PANEL "Install the SvelteKit web panel (Bun)? (y/n)" "y"
 
-# AlmaLinux/RHEL-family ships firewalld active by default, allowing nothing
-# but SSH in - unlike Debian/Ubuntu, which has no firewall active out of the
-# box, so nothing was needed here for that family. Without this, the VPS/
-# cloud firewall notice above would be satisfied but the host's own firewall
-# would still silently drop everything.
+# AlmaLinux/RHEL-family ships firewalld active by default (Debian/Ubuntu doesn't) - without this it'd still block everything.
 if [ "$OS_FAMILY" = "rhel" ] && command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
     log "Opening the needed port(s) in firewalld"
     if [ "$TLS_MODE" = "http" ]; then
-        # The SvelteKit web panel is the single public origin in http mode
-        # (it proxies /v1/* to controlplane itself), so it needs the public
-        # port instead of controlplane.
         case "${WEB_PANEL:-n}" in
             y|Y) firewall-cmd --permanent --add-port=3000/tcp ;;
             *)   firewall-cmd --permanent --add-port=8080/tcp ;;
         esac
     else
-        # --add-service=https is just a named alias for --add-port=443/tcp -
-        # using --add-port directly here instead covers a non-default
-        # HTTPS_PORT too.
         firewall-cmd --permanent --add-service=http --add-port="$HTTPS_PORT/tcp"
     fi
     firewall-cmd --reload
@@ -222,12 +146,7 @@ ask_secret ADMIN_TOKEN "Admin panel token"
 ask_secret DB_PASSWORD "Postgres password for the openflux role"
 [ -n "$DB_PASSWORD" ] || DB_PASSWORD="$(openssl rand -hex 24)"
 
-# Unlike ADMIN_TOKEN/DB_PASSWORD there is no ask_secret prompt for this one -
-# it's an internal hashing salt, not something anyone should be typing in by
-# hand - so it must always come from the existing install if there is one.
-# Every key/node/ingest-token secret is stored hashed with it; regenerating
-# it on a redeploy would silently turn every previously issued one into a
-# permanent mismatch (see read_existing_env's comment above).
+# Internal hashing salt, not user-facing - must come from the existing install if there is one (see read_existing_env).
 TOKEN_PEPPER="$(read_existing_env CONTROLPLANE_TOKEN_PEPPER)"
 [ -n "$TOKEN_PEPPER" ] || TOKEN_PEPPER="$(openssl rand -hex 32)"
 
@@ -238,20 +157,9 @@ if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
     ask RUN_NODE_HERE "Also run this exit node on this same server? (y/n)" "y"
 fi
 
-# http mode skips Nginx and certbot entirely - controlplane is reachable
-# directly on plain HTTP with nothing in front of it, so there's no reverse
-# proxy or certificate to install in the first place (see the
-# CONTROLPLANE_LISTEN_ADDR/CONTROLPLANE_PUBLIC_URL write below, and the
-# "Configuring Nginx"/"Requesting a TLS certificate" sections further down).
 if [ "$OS_FAMILY" = "debian" ]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    # postgresql-contrib provides the pgcrypto extension controlplane's own
-    # first migration (0001_init.sql) requires - not pulled in by the
-    # postgresql metapackage itself. This bit plain Debian/Astra despite
-    # apparently working fine on stock Ubuntu, whose postgresql metapackage
-    # depends on it transitively through a different chain of packages that
-    # doesn't hold everywhere.
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
         apt-get install -y git curl postgresql postgresql-contrib openssl unzip
@@ -260,43 +168,20 @@ if [ "$OS_FAMILY" = "debian" ]; then
         apt-get install -y git curl postgresql postgresql-contrib nginx snapd openssl unzip
     fi
 else
-    # AlmaLinux/RHEL-family: postgresql-server (unlike Debian's postgresql
-    # package, dnf's doesn't init or start itself - see the initdb/enable
-    # step near "Setting up Postgres" below), postgresql-contrib (pgcrypto -
-    # see the comment on the Debian branch above), and iptables-nft (the
-    # exit-node setup below shells out to `iptables` directly; a minimal
-    # AlmaLinux cloud image doesn't ship that binary at all by default,
-    # favoring firewall-cmd/nft instead).
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
         dnf install -y git curl postgresql-server postgresql postgresql-contrib openssl iptables-nft unzip
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
         dnf install -y epel-release
-        # policycoreutils-python-utils provides semanage/restorecon, used
-        # below to label $NGINX_LOCATIONS_FILE - not guaranteed present on a
-        # minimal AlmaLinux/RHEL-family image, and without it SELinux blocks
-        # nginx from ever reading that file (see the labeling step's comment).
         dnf install -y git curl postgresql-server postgresql postgresql-contrib nginx snapd openssl iptables-nft unzip policycoreutils-python-utils
-        # snapd needs its socket unit enabled and the classic-snap symlink
-        # created by hand on RHEL-family - Debian's snapd package does both
-        # itself as part of installation.
         systemctl enable --now snapd.socket
         ln -sf /var/lib/snapd/snap /snap
     fi
 fi
 
 if [ "$TLS_MODE" != "http" ]; then
-    # ---------------------------------------------------------------------
-    # Debian/Ubuntu's apt-packaged certbot (and AlmaLinux's EPEL one) is
-    # years behind upstream (e.g. Ubuntu 24.04 ships 2.9.0) and doesn't know
-    # about IP-address certificates at all (--ip-address landed in certbot
-    # 5.3) - it rejects a bare IP outright ("will not issue certificates for
-    # a bare IP address") before ever asking Let's Encrypt. certbot's own
-    # snap is the officially recommended way to stay current, so that's what
-    # obtain_tls below relies on. If snap isn't usable on this host, this is
-    # deliberately non-fatal: obtain_tls will just fail to find certbot and
-    # the existing self-signed fallback takes over.
+    # Distro-packaged certbot is too old for IP-address certs (needs 5.3+) - certbot's own snap stays current.
     log "Installing certbot via snap"
     if command -v snap >/dev/null 2>&1 &&
         snap wait system seed.loaded 2>/dev/null &&
@@ -313,8 +198,6 @@ fi
 log "Installing Go $GO_VERSION (apt's Go is usually too old for this project)"
 if ! command -v /usr/local/go/bin/go >/dev/null 2>&1 || \
    ! /usr/local/go/bin/go version | grep -q "go$GO_VERSION"; then
-    # dpkg doesn't exist on AlmaLinux/RHEL-family - fall back to uname -m's
-    # naming there instead.
     if command -v dpkg >/dev/null 2>&1; then
         ARCH="$(dpkg --print-architecture)"
     else
@@ -338,11 +221,7 @@ fi
 export PATH="/usr/local/go/bin:$PATH"
 
 log "Fetching openflux-server ($GIT_REF)"
-# Every run after the first sees $SRC_DIR owned by $SYSTEM_USER (the chown
-# below applies to the whole $INSTALL_ROOT, .git included), while this
-# script always runs as root - without this, git's dubious-ownership check
-# refuses to touch a repo it doesn't own, breaking every redeploy after the
-# first with "detected dubious ownership in repository".
+# Needed once $SRC_DIR is owned by $SYSTEM_USER (see chown below) - git refuses a repo it doesn't own otherwise.
 git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$SRC_DIR" ||
     git config --global --add safe.directory "$SRC_DIR"
 if [ -d "$SRC_DIR/.git" ]; then
@@ -363,50 +242,24 @@ if [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; then
     ( cd "$SRC_DIR" && go build -o "$BIN_DIR/universal-bypass-tool" . )
 fi
 
-# The SvelteKit web panel (../server/controlplane/web) is optional: controlplane
-# always serves its own embedded panel at /admin/ regardless (see admin.html),
-# so if Bun isn't available or the panel fails to build, this only disables the
-# fancier frontend, never the service. WEB_PANEL was asked before package
-# install; a failed install/build flips it to "n" and the script carries on
-# with the embedded panel - which is also exactly what happens for
-# non-interactive callers (e.g. deployssh) that don't pre-set WEB_PANEL.
+# Optional: controlplane always serves its own embedded panel at /admin/ regardless (see admin.html).
 WEB_BUN="${WEB_BUN:-}"
 if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     log "Setting up Bun (for the SvelteKit web panel)"
     BUN_INSTALL_DIR="$INSTALL_ROOT/bun"
-    # Prefer our own pinned install first - always reachable from the
-    # web-panel systemd unit's ProtectHome=true sandbox below, unlike
-    # anything a bare `command -v bun` might turn up.
     if [ -x "$BUN_INSTALL_DIR/bin/bun" ]; then
         WEB_BUN="$BUN_INSTALL_DIR/bin/bun"
     else
         WEB_BUN="$(command -v bun || true)"
         case "$WEB_BUN" in
             /root/*|/home/*)
-                # ProtectHome=true makes /root and /home invisible inside the
-                # web-panel service's sandbox - a bun living there (e.g. a
-                # stray leftover from an older, pre-fix run of this script
-                # that installed to the default ~/.bun, or an operator's own
-                # interactive login-shell install) would pass this check but
-                # fail at actual service start with the binary simply gone.
-                # Treat it as absent and install our own pinned copy instead.
+                # Invisible inside the web-panel service's ProtectHome=true sandbox - treat as absent.
                 WEB_BUN=""
                 ;;
         esac
     fi
     if [ -z "$WEB_BUN" ]; then
-        # `VAR=x cmd1 | cmd2` only sets VAR for cmd1 - each stage of a
-        # pipeline is its own process, and bun's install script runs as the
-        # `bash` on the RIGHT of the pipe, which never saw BUN_INSTALL this
-        # way (confirmed live: it installed to the default ~/.bun instead).
-        # `export` inside a `(...)` subshell scopes it to just this pipeline
-        # without leaking BUN_INSTALL into the rest of this script's
-        # environment. A zero exit still isn't proof the binary landed
-        # (seen live too, separately) - checked explicitly instead of
-        # trusting the exit code alone, so a broken install fails HERE with
-        # a clear warning rather than surfacing later as a raw "No such
-        # file or directory" from the next step trying to exec a binary
-        # that was never there.
+        # export inside (...) scopes BUN_INSTALL to bun's own install pipeline without leaking it further.
         if (export BUN_INSTALL="$BUN_INSTALL_DIR"; curl -fsSL https://bun.sh/install | bash) &&
             [ -x "$BUN_INSTALL_DIR/bin/bun" ]; then
             WEB_BUN="$BUN_INSTALL_DIR/bin/bun"
@@ -419,29 +272,8 @@ fi
 if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     log "Building the SvelteKit web panel"
     WEB_DIR="$INSTALL_ROOT/web"
-    # node_modules comes along too, not just build/ + server.js: the
-    # adapter-node output in build/handler.js requires @sveltejs/kit's own
-    # runtime helpers (import "@sveltejs/kit/node" and friends) resolvable
-    # from wherever `bun server.js` actually runs - which is $WEB_DIR, per
-    # the systemd unit's WorkingDirectory below, not this checkout. Without
-    # it the service fails immediately ("Cannot find module
-    # '@sveltejs/kit/node'") - reproduced live once Bun's own install
-    # started succeeding (see the BUN_INSTALL fix above); before that this
-    # step never even got this far, since the previous, unrelated bun
-    # install failure already fell back to WEB_PANEL=n.
-    # Staged into $WEB_DIR.new and swapped into place only once every step
-    # below succeeds - building straight into the live $WEB_DIR would
-    # overwrite its (small) build/ output before the much larger
-    # node_modules copy even starts; a failure partway through (disk full on
-    # node_modules, most commonly) used to leave a live $WEB_DIR with a
-    # freshly-built build/ paired with a stale node_modules, which keeps
-    # working only until the next unrelated restart - then reproduces
-    # exactly the "Cannot find module '@sveltejs/kit/node'" crash this
-    # already fixed once. `mv` within $INSTALL_ROOT is a same-filesystem
-    # rename, so the swap itself is effectively instant. Staging fresh each
-    # time (rather than `cp -a` merging into an existing $WEB_DIR) also means
-    # a dependency removed from package.json actually disappears on redeploy
-    # instead of lingering under node_modules indefinitely.
+    # node_modules ships alongside build/ - adapter-node's handler.js needs it resolvable from $WEB_DIR at runtime.
+    # Staged into $WEB_DIR.new and swapped in only once every step succeeds, so a failure partway through never leaves a mismatched build/+node_modules live.
     WEB_DIR_NEW="$WEB_DIR.new"
     WEB_DIR_OLD="$WEB_DIR.old"
     rm -rf "$WEB_DIR_NEW"
@@ -453,10 +285,7 @@ if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
         && cp -a node_modules "$WEB_DIR_NEW/" \
         && cp package.json server.js "$WEB_DIR_NEW/" ); then
         rm -rf "$WEB_DIR_OLD"
-        # Not `[ -d "$WEB_DIR" ] && mv ...`: under `set -e`, that whole
-        # statement's exit status is the test's when it's false (a fresh
-        # install, $WEB_DIR not existing yet) - the compound command's own
-        # non-zero status would then abort the script right here.
+        # Not `[ -d "$WEB_DIR" ] && mv ...` - under set -e a false test here would abort the script.
         if [ -d "$WEB_DIR" ]; then
             mv "$WEB_DIR" "$WEB_DIR_OLD"
         fi
@@ -476,12 +305,7 @@ chown -R "$SYSTEM_USER:$SYSTEM_USER" "$INSTALL_ROOT"
 
 log "Setting up Postgres"
 if [ "$OS_FAMILY" = "rhel" ]; then
-    # Debian's postgresql package initializes and starts its own cluster on
-    # install; dnf's postgresql-server does neither - both are needed by
-    # hand, guarded so a redeploy's second run doesn't try to initdb an
-    # already-initialized data directory. AlmaLinux's default module-stream
-    # package uses /var/lib/pgsql/data directly (no version subdirectory);
-    # the glob is a fallback for anything packaged the versioned way instead.
+    # dnf's postgresql-server doesn't init/start itself the way Debian's postgresql package does.
     find_pg_datadir() {
         if [ -d /var/lib/pgsql/data ]; then
             echo /var/lib/pgsql/data
@@ -494,10 +318,7 @@ if [ "$OS_FAMILY" = "rhel" ]; then
         postgresql-setup --initdb
         PG_DATADIR="$(find_pg_datadir)"
     fi
-    # Default pg_hba.conf on RHEL-family authenticates 127.0.0.1/::1 TCP
-    # connections with "ident", which rejects the password auth
-    # $DATABASE_URL below relies on - Debian/Ubuntu's default already allows
-    # it, so nothing analogous was needed there.
+    # RHEL-family's default pg_hba.conf uses "ident" for local TCP, which rejects the password auth DATABASE_URL needs.
     if [ -n "$PG_DATADIR" ] && [ -f "$PG_DATADIR/pg_hba.conf" ]; then
         sed -i -E 's/^(host +all +all +127\.0\.0\.1\/32 +)ident/\1scram-sha-256/' "$PG_DATADIR/pg_hba.conf"
         sed -i -E 's/^(host +all +all +::1\/128 +)ident/\1scram-sha-256/' "$PG_DATADIR/pg_hba.conf"
@@ -520,12 +341,7 @@ DATABASE_URL="postgres://$DB_USER:$DB_PASSWORD@127.0.0.1:5432/$DB_NAME?sslmode=d
 
 log "Writing $ENV_FILE"
 mkdir -p "$(dirname "$ENV_FILE")"
-# In ip/domain mode Nginx fronts both services on the same HTTPS origin, so
-# controlplane stays on loopback and CONTROLPLANE_PUBLIC_URL names the
-# Nginx host. http mode has no Nginx: if the web panel is installed it
-# becomes the single public origin on :3000 and proxies /v1/* back to
-# controlplane (which then only needs loopback); without it controlplane
-# binds the public interface directly as before.
+# ip/domain mode: Nginx fronts both services, controlplane stays on loopback. http mode: web panel (if any) is the public origin instead.
 WEB_HOST="127.0.0.1"
 WEB_PORT="3000"
 if [ "$TLS_MODE" = "http" ]; then
@@ -555,9 +371,6 @@ EOF
 chown "$SYSTEM_USER:$SYSTEM_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-# The web panel's own env - CONTROLPLANE_UPSTREAM is where it forwards /v1/*
-# and /healthz (in http mode this is what lets the browser use one origin);
-# the web service still binds on loopback unless http mode needs it public.
 if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     cat > "$WEB_ENV_FILE" <<EOF
 CONTROLPLANE_UPSTREAM=http://127.0.0.1:8080
@@ -568,10 +381,7 @@ EOF
     chmod 600 "$WEB_ENV_FILE"
 fi
 
-# Templates below are inlined (not read from a sibling templates/ directory)
-# because both documented ways of running this script - curl -o install.sh
-# && bash install.sh, and the Android app's SSH deployer (see
-# server/deployssh) - fetch only this one file, not the repo it lives in.
+# Templates are inlined, not read from a sibling file - both `curl -o install.sh` and the app's SSH deployer fetch only this one file.
 log "Installing the systemd service"
 sed "s#/opt/openflux#$INSTALL_ROOT#g" <<'SERVICE_TEMPLATE' > "/etc/systemd/system/$SERVICE_NAME.service"
 [Unit]
@@ -587,6 +397,7 @@ EnvironmentFile=/etc/openflux/controlplane.env
 ExecStart=/opt/openflux/bin/controlplane
 Restart=on-failure
 RestartSec=2
+LimitNOFILE=65535
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -598,17 +409,9 @@ WantedBy=multi-user.target
 SERVICE_TEMPLATE
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
-# Not "enable --now": on an already-running service (any redeploy),
-# `start` is a no-op - the process would keep running the old binary with
-# whatever env vars (admin token included) it started with, ignoring
-# everything this run just rebuilt/rewrote. `restart` is what actually
-# picks up a new binary or a changed $ENV_FILE either way, first install
-# or redeploy alike.
+# restart, not enable --now - a bare `start` on an already-running service would keep the old binary/env alive across a redeploy.
 systemctl restart "$SERVICE_NAME"
 
-# The web panel service uses the same restart-not-just-start approach as
-# controlplane above, so a redeploy picks up the freshly built frontend
-# instead of keeping a stale one warm.
 if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     log "Installing the web panel systemd service"
     [ -n "$WEB_BUN" ] || WEB_BUN="$(command -v bun || echo /opt/openflux/bun/bin/bun)"
@@ -651,32 +454,16 @@ for _ in $(seq 1 20); do
 done
 curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 || die "controlplane did not start - check: journalctl -u $SERVICE_NAME"
 
-# http mode has no Nginx installed at all (see the package-install step
-# above) - controlplane is reached directly on its own plain-HTTP port, so
-# there's nothing to reverse-proxy and no certificate to request.
 if [ "$TLS_MODE" != "http" ]; then
 
 log "Configuring Nginx"
-# SELinux ships enforcing by default on AlmaLinux/RHEL-family and blocks
-# Nginx from making outbound connections at all (httpd_can_network_connect
-# is off by default) - without this, every proxy_pass below to
-# 127.0.0.1:8080 would 502 rather than reach controlplane. Debian/Ubuntu has
-# no SELinux, so nothing analogous applies there.
+# SELinux (RHEL-family) blocks Nginx from proxying out by default - without this every proxy_pass below would 502.
 if [ "$OS_FAMILY" = "rhel" ] && command -v setsebool >/dev/null 2>&1; then
     setsebool -P httpd_can_network_connect 1 2>/dev/null || true
 fi
-# Debian/Ubuntu's nginx package starts and enables its own service on
-# install; Astra Linux's apparently doesn't ("nginx.service is not active,
-# cannot reload" further down otherwise) - enable --now is a safe no-op if
-# it's already running either way.
 systemctl enable --now nginx
 mkdir -p /var/www/certbot /etc/nginx/conf.d
-# One snippet holds every proxy location block and is `include`d from both
-# vhost templates below (they have to stay identical for the certbot --nginx
-# and hand-written-https paths). With the SvelteKit panel installed, /admin/
-# goes to Bun on :3000 while /v1/ + /healthz stay on controlplane - without
-# it, everything lands on controlplane, which still serves its embedded
-# panel at /admin/ on its own.
+# Shared by both vhost templates below; routes /admin/ to the web panel (if any), everything else to controlplane.
 write_web_locations() {
     mkdir -p "$(dirname "$NGINX_LOCATIONS_FILE")"
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
@@ -719,33 +506,14 @@ WEB_LOCS
     fi
 }
 write_web_locations
-# $NGINX_LOCATIONS_FILE sits outside nginx's own config tree on purpose (see
-# NGINX_LOCATIONS_FILE's doc comment on why), so on an SELinux-enforcing
-# RHEL-family host it gets the generic etc_t context instead of the
-# httpd_config_t nginx's own package pre-labels /etc/nginx/conf.d/* with -
-# and httpd_t (nginx's SELinux domain) is denied open() on etc_t, so the
-# `nginx -t` below would otherwise fail with "Permission denied" reading this
-# file on every enforcing-SELinux host, not just as a rare edge case. `-a`
-# adds a fresh fcontext rule; on a re-run it already exists, so fall back to
-# `-m` (modify) instead of failing.
+# Needs the SELinux httpd_config_t label on RHEL-family, or nginx -t fails reading it ("Permission denied").
 if [ "$OS_FAMILY" = "rhel" ] && command -v semanage >/dev/null 2>&1; then
     semanage fcontext -a -t httpd_config_t "$NGINX_LOCATIONS_FILE" 2>/dev/null \
         || semanage fcontext -m -t httpd_config_t "$NGINX_LOCATIONS_FILE" 2>/dev/null || true
     command -v restorecon >/dev/null 2>&1 && restorecon "$NGINX_LOCATIONS_FILE" 2>/dev/null || true
 fi
-# conf.d/*.conf, not sites-available+sites-enabled: the latter is a
-# Debian/Ubuntu packaging convention that not every Debian derivative
-# actually ships (Astra Linux's nginx package doesn't create
-# sites-available at all) and that AlmaLinux/RHEL-family's nginx package
-# never uses in the first place - conf.d is the one layout every nginx
-# package here actually includes from its default nginx.conf.
 sed -e "s/__SERVER_NAME__/$SERVER_NAME/g" -e "s#__NGINX_LOCATIONS_FILE__#$NGINX_LOCATIONS_FILE#g" <<'NGINX_INITIAL_TEMPLATE' > "/etc/nginx/conf.d/openflux.conf"
-# Written by install.sh. HTTP-only reverse proxy in front of the control
-# plane services, also serving Let's Encrypt's HTTP-01 challenge from
-# /var/www/certbot - obtain_tls below needs that reachable before it runs.
-# Domain mode's certbot --nginx plugin rewrites this into an HTTPS block
-# itself; IP mode (and the self-signed fallback) get a hand-written one -
-# see obtain_tls and write_https_nginx_config.
+# Written by install.sh.
 server {
     listen 80;
     listen [::]:80;
@@ -758,36 +526,14 @@ server {
     include __NGINX_LOCATIONS_FILE__;
 }
 NGINX_INITIAL_TEMPLATE
-# Both are stock default vhosts that would otherwise fight ours over
-# listening on :80 as the default_server - Debian/Ubuntu/Astra's under
-# sites-enabled, AlmaLinux/RHEL-family's directly in conf.d. Harmless if
-# whichever one doesn't apply to this OS isn't present.
+# Removes stock default vhosts and this script's own pre-conf.d leftovers, which would otherwise fight this one over :80.
 rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
-# A server first deployed before this script moved to conf.d wrote its own
-# vhost under sites-available+sites-enabled instead - a redeploy that just
-# adds the new conf.d/openflux.conf alongside it would leave both loaded at
-# once, fighting over the same :80/:443, without nginx -t necessarily
-# refusing to start (it just warns and picks one, likely by parse order).
-# Remove our own old-layout vhost specifically (not the whole directory -
-# never touch anything this script didn't create itself).
 rm -f /etc/nginx/sites-enabled/openflux /etc/nginx/sites-available/openflux
-# Same deal for THIS script's own now-obsolete locations-snippet path
-# (moved to $NGINX_LOCATIONS_FILE - see that constant's comment): a
-# leftover from before that move sits directly under conf.d/, where
-# nginx's default nginx.conf glob-includes it regardless of whether this
-# script still writes there, and fails nginx -t exactly the same way a
-# fresh run without this cleanup would - the newer script alone can't fix
-# a server a previous run of it already broke.
 rm -f /etc/nginx/conf.d/openflux-locations.conf
 nginx -t
 systemctl reload nginx
 
-# Writes the HTTPS vhost for an already-obtained cert/key pair and reloads
-# Nginx. Used for IP-mode certificates and the self-signed fallback - NOT
-# for domain mode, where certbot's own --nginx plugin edits Nginx itself
-# (mature, auto-installs and renews on its own; see obtain_tls). The
-# acme-challenge location is kept even after moving to HTTPS so a future
-# webroot-based renewal (IP mode) keeps working without editing this again.
+# Used for IP-mode certs and the self-signed fallback; domain mode's certbot --nginx plugin edits Nginx itself instead.
 write_https_nginx_config() {
     local cert="$1" key="$2"
     local redirect_port_suffix=""
@@ -827,18 +573,9 @@ NGINX_HTTPS_TEMPLATE
     systemctl reload nginx
 }
 
-# Requests a certificate for $SERVER_NAME. Domain mode uses certbot's own
-# nginx plugin (mature, auto-edits/reloads Nginx and renews itself). IP mode
-# uses Let's Encrypt's newer short-lived-certificate-for-IP-address
-# capability, which as of certbot 5.x only supports the webroot plugin and
-# doesn't auto-install into a web server yet - write_https_nginx_config
-# does that part by hand. On any failure this falls back to a self-signed
-# certificate instead of leaving the panel on plain HTTP or aborting.
+# Domain mode uses certbot's --nginx plugin; IP mode uses its short-lived-IP-cert capability, hand-installed via write_https_nginx_config.
 obtain_tls() {
     if [ "$TLS_MODE" = "domain" ]; then
-        # --https-port only matters when it differs from certbot's own
-        # default (443) - passed unconditionally is harmless either way,
-        # but this keeps the common-case invocation exactly as before.
         local https_port_flag=""
         [ "$HTTPS_PORT" = "443" ] || https_port_flag="--https-port $HTTPS_PORT"
         certbot --nginx --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_NAME" --redirect $https_port_flag
@@ -846,12 +583,7 @@ obtain_tls() {
     fi
 
     log "Attempting Let's Encrypt short-lived certificate for IP $SERVER_NAME"
-    # IP mode never prompts for an email (see ask() above), but the ACME
-    # server still validates whatever address it's given - a made-up
-    # address under the reserved .invalid TLD (RFC 2606) used to be passed
-    # here and was rejected outright ("believes ... is an invalid email
-    # address"). Falls back to a random mailbox on a real, resolvable
-    # domain instead when the caller didn't supply LE_EMAIL.
+    # ACME rejects a made-up address under .invalid, so fall back to a random mailbox on a real domain instead.
     local ip_mode_email="${LE_EMAIL:-$(openssl rand -hex 6)@helloo.lol}"
     if certbot certonly --webroot --webroot-path /var/www/certbot --non-interactive --agree-tos \
         -m "$ip_mode_email" \
@@ -892,29 +624,15 @@ else
     log "http mode: skipping Nginx/TLS - controlplane is reachable directly on $CONTROLPLANE_PUBLIC_URL"
 fi
 
-# A caller can hand NODE_TOKEN in directly (matching every other
-# ask()-skippable variable in this script) to recover a node whose token
-# neither the API nor $NODEAGENT_ENV_FILE can produce anymore - see the
-# warn() below.
 NODE_TOKEN="${NODE_TOKEN:-}"
 NODE_ID=""
 if [ "${REGISTER_NODE:-n}" = "y" ] || [ "${REGISTER_NODE:-n}" = "Y" ]; then
-    # REGISTER_NODE=y is the app's default on every deploy, including
-    # redeploys of an already-registered server - without this check, each
-    # one would register a brand new duplicate node (same name, new id),
-    # leaving the old one's token orphaned instead of touching anything.
+    # Avoids registering a duplicate node on every redeploy of an already-registered server.
     EXISTING_NODES="$(curl -fsS "http://127.0.0.1:8080/v1/admin/nodes" \
         -H "Authorization: Bearer $ADMIN_TOKEN")" || EXISTING_NODES=""
     if printf '%s' "$EXISTING_NODES" | grep -qF "\"Name\":\"$NODE_NAME\""; then
         log "Node \"$NODE_NAME\" is already registered - leaving it as is"
-        # A redeploy can't get a fresh token for a node that already exists
-        # (one-way hashed, same as any other) - the only way this run's
-        # locally-run node keeps working is reusing what a previous run
-        # already saved, or one the caller hands in directly (matching every
-        # other ask()-skippable variable in this script). If neither is
-        # available (e.g. the node was created by hand, or RUN_NODE_HERE was
-        # "n" before), there is genuinely nothing to recover here short of
-        # rotating.
+        # A node's token is one-way hashed, same as any other - a redeploy can only reuse a previously saved copy.
         NODE_TOKEN="${NODE_TOKEN:-$(read_existing_env NODEAGENT_TOKEN "$NODEAGENT_ENV_FILE")}"
         NODE_ID="$(printf '%s' "$EXISTING_NODES" | grep -o "\"ID\":\"[^\"]*\",\"Name\":\"$NODE_NAME\"" | grep -o '"ID":"[^"]*"' | cut -d'"' -f4 | head -n1)"
         if [ -z "$NODE_TOKEN" ]; then
@@ -938,19 +656,10 @@ NODE_RUNNING_HERE="n"
 if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ -n "$NODE_TOKEN" ]; then
     log "Setting up the exit node on this server"
 
-    # The exit node relays real TCP/IP packets through a raw socket instead
-    # of the kernel's own TCP stack, so the kernel - which knows nothing
-    # about these connections - would otherwise see their unexpected
-    # inbound packets and RST them itself. -C first so a redeploy doesn't
-    # pile up a duplicate copy of this rule every time.
+    # The kernel would otherwise RST/ICMP-unreachable the raw socket's own TCP/UDP traffic, since it owns no socket for it.
     iptables -C OUTPUT -p tcp --tcp-flags RST RST -j DROP 2>/dev/null || \
         iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
 
-    # Same problem, UDP side: the raw socket claims inbound UDP datagrams
-    # for ports the kernel's own UDP stack never opened a socket on, so the
-    # kernel answers those with its own "port unreachable" ICMP before our
-    # relayed response ever gets a chance to - tearing the flow down from
-    # the remote peer's point of view mid-exchange.
     iptables -C OUTPUT -p icmp --icmp-type port-unreachable -j DROP 2>/dev/null || \
         iptables -A OUTPUT -p icmp --icmp-type port-unreachable -j DROP
 
@@ -973,6 +682,7 @@ EnvironmentFile=/etc/openflux/nodeagent.env
 ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN}
 Restart=on-failure
 RestartSec=2
+LimitNOFILE=524288
 NoNewPrivileges=true
 
 [Install]
@@ -980,9 +690,6 @@ WantedBy=multi-user.target
 NODEAGENT_SERVICE_TEMPLATE
     systemctl daemon-reload
     systemctl enable "$NODEAGENT_SERVICE_NAME"
-    # restart, not enable --now - see the identical comment on the
-    # controlplane service above; the exact same stale-process trap applies
-    # here on every redeploy.
     systemctl restart "$NODEAGENT_SERVICE_NAME"
 
     sleep 2
@@ -1039,8 +746,5 @@ fi
 
 echo "Re-run this script any time to redeploy a newer --git-ref of openflux-server."
 
-# One machine-readable line for automated callers (e.g. the app's SSH
-# deployer) to parse - see server/deployssh's resultLinePrefix. Harmless
-# to ignore if you're reading this as a human; everything in it is already
-# in the summary above.
+# Machine-readable line for automated callers (e.g. the app's SSH deployer) - see server/deployssh's resultLinePrefix.
 echo "OPENFLUX_DEPLOY_RESULT panel_url=$PANEL_URL admin_token=$ADMIN_TOKEN node_token=${NODE_TOKEN:-}"
