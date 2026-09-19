@@ -96,8 +96,10 @@ stdin isn't interactive.
   and `openflux-web.service` (`bun server.js` on `127.0.0.1:3000`, `CONTROLPLANE_UPSTREAM` holding
   the controlplane address it forwards `/v1/*` to).
 - Nginx: `/admin/` → the web panel (or controlplane's embedded panel, when Bun was skipped),
-  `/v1/` + `/healthz` → controlplane on `127.0.0.1:8080`, all over TLS per the mode above. In
-  `http` mode without a web panel the split doesn't apply and controlplane answers directly.
+  `/v1/` + `/healthz` → controlplane on `127.0.0.1:8080` (override with the `CONTROLPLANE_PORT`
+  env var if something else on the server already holds 8080 - a redeploy remembers whatever
+  port was used last time), all over TLS per the mode above. In `http` mode without a web panel
+  the split doesn't apply and controlplane answers directly.
 
 ## Honesty about the IP-certificate path
 

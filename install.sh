@@ -87,12 +87,22 @@ echo "Answer the questions below; press Enter to accept the default in [brackets
 ask REPO_URL "openflux-server repo URL" "$DEFAULT_REPO_URL"
 ask GIT_REF "Git branch/tag to deploy" "main"
 
+# Internal port controlplane binds to on loopback (or publicly in http mode without a web panel).
+# Not asked interactively - only worth changing if something else on this server already holds it.
+# Auto-recovered from a previous run's saved CONTROLPLANE_LISTEN_ADDR so a redeploy doesn't silently
+# revert a manually-picked port back to 8080.
+CONTROLPLANE_PORT="${CONTROLPLANE_PORT:-}"
+if [ -z "$CONTROLPLANE_PORT" ]; then
+    CONTROLPLANE_PORT="$(read_existing_env CONTROLPLANE_LISTEN_ADDR | grep -o '[0-9]*$')"
+fi
+CONTROLPLANE_PORT="${CONTROLPLANE_PORT:-8080}"
+
 echo
 echo "Before you continue: your VPS/cloud firewall (security group) needs to allow"
 echo "inbound TCP 443 for 'domain'/'ip' mode below (443 is just the default and can be"
 echo "changed in a moment if it's already taken; plus TCP 80 too if you want normal"
 echo "Let's Encrypt renewal instead of the default self-signed cert - see the next"
-echo "few questions), or TCP 8080 for 'http' mode - whichever you pick, that port has"
+echo "few questions), or TCP $CONTROLPLANE_PORT for 'http' mode - whichever you pick, that port has"
 echo "to be reachable from the internet or nothing past this point will actually work."
 echo
 
@@ -109,7 +119,7 @@ elif [ "$TLS_MODE" = "http" ]; then
     ask SERVER_IP "Public IP of this server" "$DETECTED_IP"
     [ -n "$SERVER_IP" ] || die "Could not detect the public IP automatically - enter it manually."
     SERVER_NAME="$SERVER_IP"
-    warn "http mode: the admin API will be served in PLAIN HTTP on port 8080, with no" \
+    warn "http mode: the admin API will be served in PLAIN HTTP on port $CONTROLPLANE_PORT, with no" \
          "Nginx or TLS in front of it at all - anyone on the network path (your ISP, the" \
          "VPS host's network, a coffee-shop Wi-Fi) can read the admin token and every" \
          "request in transit. Only pick this if you're managing everything from the app" \
@@ -136,7 +146,7 @@ if [ "$OS_FAMILY" = "rhel" ] && command -v firewall-cmd >/dev/null 2>&1 && syste
     if [ "$TLS_MODE" = "http" ]; then
         case "${WEB_PANEL:-n}" in
             y|Y) firewall-cmd --permanent --add-port=3000/tcp ;;
-            *)   firewall-cmd --permanent --add-port=8080/tcp ;;
+            *)   firewall-cmd --permanent --add-port="$CONTROLPLANE_PORT/tcp" ;;
         esac
     elif [ "${RESERVE_PORT_80:-n}" = "y" ] || [ "${RESERVE_PORT_80:-n}" = "Y" ]; then
         firewall-cmd --permanent --add-port="$HTTPS_PORT/tcp"
@@ -353,15 +363,15 @@ WEB_HOST="127.0.0.1"
 WEB_PORT="3000"
 if [ "$TLS_MODE" = "http" ]; then
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
-        CONTROLPLANE_LISTEN_ADDR="127.0.0.1:8080"
+        CONTROLPLANE_LISTEN_ADDR="127.0.0.1:$CONTROLPLANE_PORT"
         CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:3000"
         WEB_HOST="0.0.0.0"
     else
-        CONTROLPLANE_LISTEN_ADDR="0.0.0.0:8080"
-        CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:8080"
+        CONTROLPLANE_LISTEN_ADDR="0.0.0.0:$CONTROLPLANE_PORT"
+        CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:$CONTROLPLANE_PORT"
     fi
 else
-    CONTROLPLANE_LISTEN_ADDR="127.0.0.1:8080"
+    CONTROLPLANE_LISTEN_ADDR="127.0.0.1:$CONTROLPLANE_PORT"
     if [ "$HTTPS_PORT" = "443" ]; then
         CONTROLPLANE_PUBLIC_URL="https://$SERVER_NAME"
     else
@@ -380,7 +390,7 @@ chmod 600 "$ENV_FILE"
 
 if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     cat > "$WEB_ENV_FILE" <<EOF
-CONTROLPLANE_UPSTREAM=http://127.0.0.1:8080
+CONTROLPLANE_UPSTREAM=http://127.0.0.1:$CONTROLPLANE_PORT
 CONTROLPLANE_WEB_HOST=$WEB_HOST
 CONTROLPLANE_WEB_PORT=$WEB_PORT
 EOF
@@ -456,10 +466,10 @@ fi
 
 log "Waiting for controlplane to come up"
 for _ in $(seq 1 20); do
-    curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 && break
+    curl -fsS "http://127.0.0.1:$CONTROLPLANE_PORT/healthz" >/dev/null 2>&1 && break
     sleep 1
 done
-curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1 || die "controlplane did not start - check: journalctl -u $SERVICE_NAME"
+curl -fsS "http://127.0.0.1:$CONTROLPLANE_PORT/healthz" >/dev/null 2>&1 || die "controlplane did not start - check: journalctl -u $SERVICE_NAME"
 
 if [ "$TLS_MODE" != "http" ]; then
 
@@ -474,7 +484,7 @@ mkdir -p /var/www/certbot /etc/nginx/conf.d
 write_web_locations() {
     mkdir -p "$(dirname "$NGINX_LOCATIONS_FILE")"
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
-        cat > "$NGINX_LOCATIONS_FILE" <<'WEB_LOCS'
+        cat <<'WEB_LOCS' | sed "s/127\.0\.0\.1:8080/127.0.0.1:$CONTROLPLANE_PORT/g" > "$NGINX_LOCATIONS_FILE"
     location /healthz {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
@@ -501,7 +511,7 @@ write_web_locations() {
     }
 WEB_LOCS
     else
-        cat > "$NGINX_LOCATIONS_FILE" <<'WEB_LOCS'
+        cat <<'WEB_LOCS' | sed "s/127\.0\.0\.1:8080/127.0.0.1:$CONTROLPLANE_PORT/g" > "$NGINX_LOCATIONS_FILE"
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
@@ -672,7 +682,7 @@ NODE_TOKEN="${NODE_TOKEN:-}"
 NODE_ID=""
 if [ "${REGISTER_NODE:-n}" = "y" ] || [ "${REGISTER_NODE:-n}" = "Y" ]; then
     # Avoids registering a duplicate node on every redeploy of an already-registered server.
-    EXISTING_NODES="$(curl -fsS "http://127.0.0.1:8080/v1/admin/nodes" \
+    EXISTING_NODES="$(curl -fsS "http://127.0.0.1:$CONTROLPLANE_PORT/v1/admin/nodes" \
         -H "Authorization: Bearer $ADMIN_TOKEN")" || EXISTING_NODES=""
     if printf '%s' "$EXISTING_NODES" | grep -qF "\"Name\":\"$NODE_NAME\""; then
         log "Node \"$NODE_NAME\" is already registered - leaving it as is"
@@ -686,7 +696,7 @@ if [ "${REGISTER_NODE:-n}" = "y" ] || [ "${REGISTER_NODE:-n}" = "Y" ]; then
         fi
     else
         log "Registering the first exit node"
-        NODE_JSON="$(curl -fsS -X POST "http://127.0.0.1:8080/v1/admin/nodes" \
+        NODE_JSON="$(curl -fsS -X POST "http://127.0.0.1:$CONTROLPLANE_PORT/v1/admin/nodes" \
             -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
             -d "{\"name\":\"$NODE_NAME\",\"max_keys\":$NODE_MAX_KEYS}")" || warn "Node registration failed - you can create one later from the admin panel."
         if [ -n "${NODE_JSON:-}" ]; then
@@ -709,7 +719,7 @@ if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ 
 
     mkdir -p "$(dirname "$NODEAGENT_ENV_FILE")"
     cat > "$NODEAGENT_ENV_FILE" <<EOF
-NODEAGENT_CONTROL_URL=http://127.0.0.1:8080
+NODEAGENT_CONTROL_URL=http://127.0.0.1:$CONTROLPLANE_PORT
 NODEAGENT_TOKEN=$NODE_TOKEN
 EOF
     chmod 600 "$NODEAGENT_ENV_FILE"
@@ -760,7 +770,7 @@ if [ "$TLS_MODE" = "http" ]; then
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
         HTTP_PORT="3000"
     else
-        HTTP_PORT="8080"
+        HTTP_PORT="$CONTROLPLANE_PORT"
     fi
     warn "http mode: the admin token above (and every request to $PANEL_URL) travels in" \
          "plain text - anyone on the network path can read it. Make sure TCP $HTTP_PORT is open" \
