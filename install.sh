@@ -53,6 +53,16 @@ if [ -f "$ENV_FILE" ]; then
     cp "$ENV_FILE" "$BACKUP_DIR/controlplane.env" 2>/dev/null || true
 fi
 
+# detect_public_ip: tries several external services in turn (a network that blocks one of them - already known to block GitHub here - shouldn't hard-fail the whole install over IP autodetection), then falls back to the local route's source address, which needs no outbound service at all and is the VPS's own public IP on the overwhelming majority of providers.
+detect_public_ip() {
+    local ip svc
+    for svc in https://ifconfig.me https://icanhazip.com https://api.ipify.org https://ipinfo.io/ip; do
+        ip="$(curl -fsS --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')" || true
+        [ -n "$ip" ] && { printf '%s' "$ip"; return; }
+    done
+    ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || true
+}
+
 ask() {
     # ask VAR "prompt" "default" - skips the prompt if VAR is already set (lets a caller pre-export answers non-interactively).
     local __var="$1" __prompt="$2" __default="${3:-}" __reply
@@ -115,7 +125,7 @@ if [ "$TLS_MODE" = "domain" ]; then
     SERVER_NAME="$DOMAIN"
     ask HTTPS_PORT "HTTPS port for the panel (change only if 443 is already used by something else on this server)" "443"
 elif [ "$TLS_MODE" = "http" ]; then
-    DETECTED_IP="$(curl -fsS --max-time 5 https://ifconfig.me || true)"
+    DETECTED_IP="$(detect_public_ip)"
     ask SERVER_IP "Public IP of this server" "$DETECTED_IP"
     [ -n "$SERVER_IP" ] || die "Could not detect the public IP automatically - enter it manually."
     SERVER_NAME="$SERVER_IP"
@@ -126,7 +136,7 @@ elif [ "$TLS_MODE" = "http" ]; then
          "and understand that tradeoff; 'ip' mode costs nothing extra and keeps the panel" \
          "on HTTPS instead."
 else
-    DETECTED_IP="$(curl -fsS --max-time 5 https://ifconfig.me || true)"
+    DETECTED_IP="$(detect_public_ip)"
     ask SERVER_IP "Public IP of this server" "$DETECTED_IP"
     [ -n "$SERVER_IP" ] || die "Could not detect the public IP automatically - enter it manually."
     SERVER_NAME="$SERVER_IP"
@@ -230,7 +240,9 @@ if ! command -v /usr/local/go/bin/go >/dev/null 2>&1 || \
         *) die "Unsupported architecture: $ARCH" ;;
     esac
     TARBALL="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
-    curl -fsSL "https://go.dev/dl/$TARBALL" -o "/tmp/$TARBALL"
+    curl -fsSL "https://go.dev/dl/$TARBALL" -o "/tmp/$TARBALL" ||
+        curl -fsSL "https://dl.google.com/go/$TARBALL" -o "/tmp/$TARBALL" ||
+        die "Could not download Go from go.dev or dl.google.com - both blocked on this network? Download $TARBALL from another machine and place it at /tmp/$TARBALL, then re-run."
     rm -rf /usr/local/go
     tar -C /usr/local -xzf "/tmp/$TARBALL"
     rm -f "/tmp/$TARBALL"
