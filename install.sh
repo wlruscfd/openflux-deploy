@@ -23,6 +23,17 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "Run this as root (sudo bash install.sh)."
 
+# HAVE_TTY: checked once, up front, instead of per-prompt - a non-pty SSH exec (the app's automated
+# deploy) has no controlling terminal at all, so every open of /dev/tty below would otherwise still
+# pay a real wait (however it manifests on a given sshd/OS) before ask() falls back to its default,
+# once per question left unset by the caller.
+if exec 3<>/dev/tty 2>/dev/null; then
+    HAVE_TTY=1
+    exec 3<&- 3>&-
+else
+    HAVE_TTY=0
+fi
+
 if command -v apt-get >/dev/null 2>&1; then
     OS_FAMILY="debian"
 elif command -v dnf >/dev/null 2>&1; then
@@ -69,8 +80,12 @@ ask() {
     if [ -n "${!__var:-}" ]; then
         return
     fi
+    if [ "$HAVE_TTY" != 1 ]; then
+        printf -v "$__var" '%s' "$__default"
+        return
+    fi
     # Reads from /dev/tty (curl|bash makes stdin the script itself) and prints the prompt by hand (bash's -p misdetects the tty here).
-    # -t 20: a detached/piped SSH exec can leave /dev/tty openable but never fed - without a timeout, a caller that forgot to pre-set this one var hangs here forever instead of the whole install just proceeding on the default.
+    # -t 20: belt-and-suspenders even with HAVE_TTY - a real terminal that just never gets typed into (left running unattended) still shouldn't wedge the install forever.
     if [ -n "$__default" ]; then
         printf '%s [%s]: ' "$__prompt" "$__default" > /dev/tty 2>/dev/null || true
     else
@@ -84,6 +99,10 @@ ask() {
 ask_secret() {
     local __var="$1" __prompt="$2" __reply
     if [ -n "${!__var:-}" ]; then
+        return
+    fi
+    if [ "$HAVE_TTY" != 1 ]; then
+        printf -v "$__var" ''
         return
     fi
     printf '%s (leave blank to auto-generate): ' "$__prompt" > /dev/tty 2>/dev/null || true
