@@ -622,7 +622,7 @@ server {
 NGINX_HTTPS_TEMPLATE
     fi
     nginx -t
-    systemctl reload nginx
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx
 }
 
 if [ "${RESERVE_PORT_80:-n}" = "y" ] || [ "${RESERVE_PORT_80:-n}" = "Y" ]; then
@@ -655,7 +655,7 @@ server {
 }
 NGINX_INITIAL_TEMPLATE
 nginx -t
-systemctl reload nginx
+systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
 # Domain mode uses certbot's --nginx plugin; IP mode uses its short-lived-IP-cert capability, hand-installed via write_https_nginx_config.
 obtain_tls() {
