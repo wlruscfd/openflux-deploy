@@ -85,13 +85,13 @@ ask() {
         return
     fi
     # Reads from /dev/tty (curl|bash makes stdin the script itself) and prints the prompt by hand (bash's -p misdetects the tty here).
-    # -t 20: belt-and-suspenders even with HAVE_TTY - a real terminal that just never gets typed into (left running unattended) still shouldn't wedge the install forever.
+    # No -t here: HAVE_TTY already routes a genuinely non-interactive run around this whole block, and read -t against /dev/tty turned out to not detect input promptly on at least one real setup - it just sat out the full timeout on every single prompt instead of returning as soon as Enter was pressed.
     if [ -n "$__default" ]; then
         printf '%s [%s]: ' "$__prompt" "$__default" > /dev/tty 2>/dev/null || true
     else
         printf '%s: ' "$__prompt" > /dev/tty 2>/dev/null || true
     fi
-    read -r -t 20 __reply < /dev/tty 2>/dev/null || true
+    read -r __reply < /dev/tty 2>/dev/null || true
     [ -n "$__default" ] && __reply="${__reply:-$__default}"
     printf -v "$__var" '%s' "$__reply"
 }
@@ -106,7 +106,7 @@ ask_secret() {
         return
     fi
     printf '%s (leave blank to auto-generate): ' "$__prompt" > /dev/tty 2>/dev/null || true
-    read -r -s -t 20 __reply < /dev/tty 2>/dev/null || true
+    read -r -s __reply < /dev/tty 2>/dev/null || true
     echo > /dev/tty 2>/dev/null || true
     printf -v "$__var" '%s' "$__reply"
 }
