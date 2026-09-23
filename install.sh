@@ -235,14 +235,22 @@ else
 fi
 
 if [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "y" ] || [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "Y" ]; then
-    log "Installing Chromium (unattended CAPTCHA-solving for the exit node - non-fatal if it fails)"
+    log "Installing a headless-capable Chrome (unattended CAPTCHA-solving for the exit node - non-fatal if it fails)"
+    # Google Chrome's own .deb, not apt's "chromium" (a snap stub on modern Ubuntu) - snap confinement wants a real per-user home dir and a systemd user session, neither of which a headless service account like $SYSTEM_USER has.
     if [ "$OS_FAMILY" = "debian" ]; then
-        apt-get install -y chromium || apt-get install -y chromium-browser || warn "Chromium install failed - the exit node will still work, just without automatic CAPTCHA solving."
+        command -v gpg >/dev/null 2>&1 || apt-get install -y gnupg >/dev/null 2>&1 || true
+        if command -v gpg >/dev/null 2>&1; then
+            install -d -m 0755 /usr/share/keyrings
+            if curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg 2>/dev/null; then
+                echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+                apt-get update -y || rm -f /etc/apt/sources.list.d/google-chrome.list
+            fi
+        fi
+        apt-get install -y google-chrome-stable || apt-get install -y chromium || apt-get install -y chromium-browser || warn "Headless Chrome install failed - the exit node will still work, just without automatic CAPTCHA solving."
     else
-        dnf install -y epel-release 2>/dev/null || true
-        dnf install -y chromium || warn "Chromium install failed - the exit node will still work, just without automatic CAPTCHA solving."
+        dnf install -y google-chrome-stable || { dnf install -y epel-release 2>/dev/null; dnf install -y chromium; } || warn "Headless Chrome install failed - the exit node will still work, just without automatic CAPTCHA solving."
     fi
-    # Recent Ubuntu kernels block unprivileged user namespaces via AppArmor by default, which makes Chromium fail with "cannot change profile for the next exec call" even under --no-sandbox. Key may not exist on other distros/kernels - failing here must not be fatal.
+    # Recent Ubuntu kernels block unprivileged user namespaces via AppArmor by default, which makes a sandboxed browser fail with "cannot change profile for the next exec call" even under --no-sandbox. Key may not exist on other distros/kernels - failing here must not be fatal.
     echo 'kernel.apparmor_restrict_unprivileged_userns=0' > /etc/sysctl.d/60-openflux-chromium.conf 2>/dev/null
     sysctl --system >/dev/null 2>&1 || true
 fi
