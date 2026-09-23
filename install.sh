@@ -232,6 +232,20 @@ else
     fi
 fi
 
+if [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; then
+    # Lets the exit node clear a Yandex CAPTCHA unattended (see EnableHeadlessCaptchaSolving) - a
+    # real browser environment often passes a bot check that a plain HTTP fetch can't. Best-effort
+    # only: the node already falls back to its normal cooldown-and-retry if this is missing or
+    # fails, so a failed/skipped install here must never abort the rest of the script.
+    log "Installing Chromium (unattended CAPTCHA-solving for the exit node - optional, non-fatal if it fails)"
+    if [ "$OS_FAMILY" = "debian" ]; then
+        apt-get install -y chromium || apt-get install -y chromium-browser || warn "Chromium install failed - the exit node will still work, just without automatic CAPTCHA solving."
+    else
+        dnf install -y epel-release 2>/dev/null || true
+        dnf install -y chromium || warn "Chromium install failed - the exit node will still work, just without automatic CAPTCHA solving."
+    fi
+fi
+
 if [ "$TLS_MODE" != "http" ] && [ "${RESERVE_PORT_80:-n}" != "y" ] && [ "${RESERVE_PORT_80:-n}" != "Y" ]; then
     # Distro-packaged certbot is too old for IP-address certs (needs 5.3+) - certbot's own snap stays current.
     log "Installing certbot via snap"
