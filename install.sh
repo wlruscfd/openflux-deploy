@@ -242,6 +242,9 @@ if [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "y" ] || [ "${ENABLE_HEADLESS_CAPTCHA:-n}
         dnf install -y epel-release 2>/dev/null || true
         dnf install -y chromium || warn "Chromium install failed - the exit node will still work, just without automatic CAPTCHA solving."
     fi
+    # Recent Ubuntu kernels block unprivileged user namespaces via AppArmor by default, which makes Chromium fail with "cannot change profile for the next exec call" even under --no-sandbox. Key may not exist on other distros/kernels - failing here must not be fatal.
+    echo 'kernel.apparmor_restrict_unprivileged_userns=0' > /etc/sysctl.d/60-openflux-chromium.conf 2>/dev/null
+    sysctl --system >/dev/null 2>&1 || true
 fi
 
 if [ "$TLS_MODE" != "http" ] && [ "${RESERVE_PORT_80:-n}" != "y" ] && [ "${RESERVE_PORT_80:-n}" != "Y" ]; then
