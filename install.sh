@@ -397,11 +397,20 @@ log "Writing $ENV_FILE"
 mkdir -p "$(dirname "$ENV_FILE")"
 # ip/domain mode: Nginx fronts both services, controlplane stays on loopback. http mode: web panel (if any) is the public origin instead.
 WEB_HOST="127.0.0.1"
-WEB_PORT="3000"
+WEB_PORT="${WEB_PORT:-}"
+if [ -z "$WEB_PORT" ]; then
+    WEB_PORT="$(read_existing_env CONTROLPLANE_WEB_PORT "$WEB_ENV_FILE" | grep -o '[0-9]*$')"
+fi
+WEB_PORT="${WEB_PORT:-3000}"
+# 3000 is also Forgejo/Gitea's default port - if something's already bound to our pick (this
+# server's own git mirror, most likely), walk forward to the next free one instead of crash-looping.
+while ss -tln 2>/dev/null | grep -q ":$WEB_PORT "; do
+    WEB_PORT=$((WEB_PORT + 1))
+done
 if [ "$TLS_MODE" = "http" ]; then
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
         CONTROLPLANE_LISTEN_ADDR="127.0.0.1:$CONTROLPLANE_PORT"
-        CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:3000"
+        CONTROLPLANE_PUBLIC_URL="http://$SERVER_NAME:$WEB_PORT"
         WEB_HOST="0.0.0.0"
     else
         CONTROLPLANE_LISTEN_ADDR="0.0.0.0:$CONTROLPLANE_PORT"
@@ -521,7 +530,7 @@ mkdir -p /var/www/certbot /etc/nginx/conf.d
 write_web_locations() {
     mkdir -p "$(dirname "$NGINX_LOCATIONS_FILE")"
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
-        cat <<'WEB_LOCS' | sed "s/127\.0\.0\.1:8080/127.0.0.1:$CONTROLPLANE_PORT/g" > "$NGINX_LOCATIONS_FILE"
+        cat <<'WEB_LOCS' | sed -e "s/127\.0\.0\.1:8080/127.0.0.1:$CONTROLPLANE_PORT/g" -e "s/127\.0\.0\.1:3000/127.0.0.1:$WEB_PORT/g" > "$NGINX_LOCATIONS_FILE"
     location /healthz {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
