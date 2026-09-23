@@ -207,6 +207,12 @@ if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
     ask NODE_NAME "First node's name" "node-1"
     ask NODE_MAX_KEYS "First node's max keys (999999 = no real limit)" "999999"
     ask RUN_NODE_HERE "Also run this exit node on this same server? (y/n)" "y"
+    if [ "$RUN_NODE_HERE" = "y" ] || [ "$RUN_NODE_HERE" = "Y" ]; then
+        # Recovers a previous "n" on redeploy instead of silently re-defaulting to "y", same idea as NODE_PORT_RANGE_SIZE below.
+        DEFAULT_HEADLESS_CAPTCHA="y"
+        [ "$(read_existing_env NODEAGENT_CAPTCHA_SOLVE_MODE "$NODEAGENT_ENV_FILE")" = "off" ] && DEFAULT_HEADLESS_CAPTCHA="n"
+        ask ENABLE_HEADLESS_CAPTCHA "Auto-solve Yandex CAPTCHAs with a headless browser when they happen? Installs Chromium (~150-200MB extra RAM only while actually solving one, idle otherwise) (y/n)" "$DEFAULT_HEADLESS_CAPTCHA"
+    fi
 fi
 
 if [ "$OS_FAMILY" = "debian" ]; then
@@ -232,12 +238,12 @@ else
     fi
 fi
 
-if [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; then
-    # Lets the exit node clear a Yandex CAPTCHA unattended (see EnableHeadlessCaptchaSolving) - a
-    # real browser environment often passes a bot check that a plain HTTP fetch can't. Best-effort
+if [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "y" ] || [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "Y" ]; then
+    # Lets the exit node clear a Yandex CAPTCHA unattended (see SetCaptchaSolveMode) - a real
+    # browser environment often passes a bot check that a plain HTTP fetch can't. Best-effort
     # only: the node already falls back to its normal cooldown-and-retry if this is missing or
     # fails, so a failed/skipped install here must never abort the rest of the script.
-    log "Installing Chromium (unattended CAPTCHA-solving for the exit node - optional, non-fatal if it fails)"
+    log "Installing Chromium (unattended CAPTCHA-solving for the exit node - non-fatal if it fails)"
     if [ "$OS_FAMILY" = "debian" ]; then
         apt-get install -y chromium || apt-get install -y chromium-browser || warn "Chromium install failed - the exit node will still work, just without automatic CAPTCHA solving."
     else
@@ -782,10 +788,16 @@ if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ 
     # Auto-recovered like CONTROLPLANE_PORT, so tuning this once (env var or by hand in the file) survives a redeploy.
     NODE_PORT_RANGE_SIZE="${NODE_PORT_RANGE_SIZE:-$(read_existing_env NODEAGENT_PORT_RANGE_SIZE "$NODEAGENT_ENV_FILE")}"
     NODE_PORT_RANGE_SIZE="${NODE_PORT_RANGE_SIZE:-96}"
+    if [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "y" ] || [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "Y" ]; then
+        NODE_CAPTCHA_SOLVE_MODE="headless_browser"
+    else
+        NODE_CAPTCHA_SOLVE_MODE="off"
+    fi
     cat > "$NODEAGENT_ENV_FILE" <<EOF
 NODEAGENT_CONTROL_URL=http://127.0.0.1:$CONTROLPLANE_PORT
 NODEAGENT_TOKEN=$NODE_TOKEN
 NODEAGENT_PORT_RANGE_SIZE=$NODE_PORT_RANGE_SIZE
+NODEAGENT_CAPTCHA_SOLVE_MODE=$NODE_CAPTCHA_SOLVE_MODE
 EOF
     chmod 600 "$NODEAGENT_ENV_FILE"
 
@@ -798,7 +810,7 @@ Wants=openflux-controlplane.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/openflux/nodeagent.env
-ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN} --port-range-size ${NODEAGENT_PORT_RANGE_SIZE}
+ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN} --port-range-size ${NODEAGENT_PORT_RANGE_SIZE} --captcha-solve-mode ${NODEAGENT_CAPTCHA_SOLVE_MODE}
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=524288
