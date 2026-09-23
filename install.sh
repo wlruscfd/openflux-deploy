@@ -208,10 +208,13 @@ if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
     ask NODE_MAX_KEYS "First node's max keys (999999 = no real limit)" "999999"
     ask RUN_NODE_HERE "Also run this exit node on this same server? (y/n)" "y"
     if [ "$RUN_NODE_HERE" = "y" ] || [ "$RUN_NODE_HERE" = "Y" ]; then
-        # Recovers a previous "n" on redeploy instead of silently re-defaulting to "y", same idea as NODE_PORT_RANGE_SIZE below.
-        DEFAULT_HEADLESS_CAPTCHA="y"
-        [ "$(read_existing_env NODEAGENT_CAPTCHA_SOLVE_MODE "$NODEAGENT_ENV_FILE")" = "off" ] && DEFAULT_HEADLESS_CAPTCHA="n"
-        ask ENABLE_HEADLESS_CAPTCHA "Auto-solve Yandex CAPTCHAs with a headless browser when they happen? Installs Chromium (~150-200MB extra RAM only while actually solving one, idle otherwise) (y/n)" "$DEFAULT_HEADLESS_CAPTCHA"
+        # Off by default - the exit node's User-Agent choice (see openflux-server's browser_ua.go)
+        # already avoids triggering most Yandex CAPTCHAs, so this extra ~150-200MB-while-solving
+        # Chromium fallback usually isn't worth it. Recovers a previous "y" on redeploy instead of
+        # silently re-defaulting to "n", same idea as NODE_PORT_RANGE_SIZE below.
+        DEFAULT_HEADLESS_CAPTCHA="n"
+        [ "$(read_existing_env NODEAGENT_CAPTCHA_SOLVE_MODE "$NODEAGENT_ENV_FILE")" = "headless_browser" ] && DEFAULT_HEADLESS_CAPTCHA="y"
+        ask ENABLE_HEADLESS_CAPTCHA "Also try a headless browser to auto-solve any Yandex CAPTCHA that still gets through? Installs Chromium (~150-200MB extra RAM only while actually solving one, idle otherwise) (y/n)" "$DEFAULT_HEADLESS_CAPTCHA"
     fi
 fi
 
