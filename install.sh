@@ -814,9 +814,16 @@ NODEAGENT_SERVICE_TEMPLATE
     systemctl enable "$NODEAGENT_SERVICE_NAME"
     systemctl restart "$NODEAGENT_SERVICE_NAME"
 
+    if [ -d "/etc/systemd/system/$NODEAGENT_SERVICE_NAME.service.d" ]; then
+        warn "A systemd drop-in override exists for $NODEAGENT_SERVICE_NAME - it overrides this ExecStart on every restart, so flags changed here (e.g. --captcha-solve-mode) may not actually apply. Remove it if it's stale:" \
+             "sudo rm -rf /etc/systemd/system/$NODEAGENT_SERVICE_NAME.service.d && sudo systemctl daemon-reload && sudo systemctl restart $NODEAGENT_SERVICE_NAME"
+    fi
+
     sleep 2
     if systemctl is-active --quiet "$NODEAGENT_SERVICE_NAME"; then
         NODE_RUNNING_HERE="y"
+        RUNNING_CMD="$(ps -o args= -p "$(systemctl show -p MainPID --value "$NODEAGENT_SERVICE_NAME")" 2>/dev/null || true)"
+        log "Exit node running with: $RUNNING_CMD"
     else
         warn "The exit-node service didn't stay up - check:" \
              "journalctl -u $NODEAGENT_SERVICE_NAME -n 50 --no-pager"
