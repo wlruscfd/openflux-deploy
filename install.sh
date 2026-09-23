@@ -17,9 +17,9 @@ WEB_ENV_FILE="/etc/openflux/web.env"
 SYSTEM_USER="openflux"
 DEFAULT_REPO_URL="https://github.com/wlruscfd/openflux-server.git"
 
-log()  { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+log()  { printf '\n==> %s\n' "$*"; }
+warn() { printf '!! %s\n' "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # Without this, `set -e` kills the script on any failing command with zero output - the exact
 # "it just silently stops" reports this line exists to end. Every future failure now names its
