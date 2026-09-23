@@ -21,10 +21,7 @@ log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Without this, `set -e` kills the script on any failing command with zero output - the exact
-# "it just silently stops" reports this line exists to end. Every future failure now names its
-# own line and command instead of returning bare to the prompt.
-trap 'printf "\033[1;31mERROR:\033[0m install.sh failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+trap 'printf "ERROR: install.sh failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 [ "$(id -u)" -eq 0 ] || die "Run this as root (sudo bash install.sh)."
 
@@ -208,10 +205,6 @@ if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
     ask NODE_MAX_KEYS "First node's max keys (999999 = no real limit)" "999999"
     ask RUN_NODE_HERE "Also run this exit node on this same server? (y/n)" "y"
     if [ "$RUN_NODE_HERE" = "y" ] || [ "$RUN_NODE_HERE" = "Y" ]; then
-        # Off by default - the exit node's User-Agent choice (see openflux-server's browser_ua.go)
-        # already avoids triggering most Yandex CAPTCHAs, so this extra ~150-200MB-while-solving
-        # Chromium fallback usually isn't worth it. Recovers a previous "y" on redeploy instead of
-        # silently re-defaulting to "n", same idea as NODE_PORT_RANGE_SIZE below.
         DEFAULT_HEADLESS_CAPTCHA="n"
         [ "$(read_existing_env NODEAGENT_CAPTCHA_SOLVE_MODE "$NODEAGENT_ENV_FILE")" = "headless_browser" ] && DEFAULT_HEADLESS_CAPTCHA="y"
         ask ENABLE_HEADLESS_CAPTCHA "Also try a headless browser to auto-solve any Yandex CAPTCHA that still gets through? Installs Chromium (~150-200MB extra RAM only while actually solving one, idle otherwise) (y/n)" "$DEFAULT_HEADLESS_CAPTCHA"
@@ -242,10 +235,6 @@ else
 fi
 
 if [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "y" ] || [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "Y" ]; then
-    # Lets the exit node clear a Yandex CAPTCHA unattended (see SetCaptchaSolveMode) - a real
-    # browser environment often passes a bot check that a plain HTTP fetch can't. Best-effort
-    # only: the node already falls back to its normal cooldown-and-retry if this is missing or
-    # fails, so a failed/skipped install here must never abort the rest of the script.
     log "Installing Chromium (unattended CAPTCHA-solving for the exit node - non-fatal if it fails)"
     if [ "$OS_FAMILY" = "debian" ]; then
         apt-get install -y chromium || apt-get install -y chromium-browser || warn "Chromium install failed - the exit node will still work, just without automatic CAPTCHA solving."
@@ -425,8 +414,7 @@ if [ -z "$WEB_PORT" ]; then
     WEB_PORT="$(read_existing_env CONTROLPLANE_WEB_PORT "$WEB_ENV_FILE" | grep -o '[0-9]*$')"
 fi
 WEB_PORT="${WEB_PORT:-3000}"
-# 3000 is also Forgejo/Gitea's default port - if something's already bound to our pick (this
-# server's own git mirror, most likely), walk forward to the next free one instead of crash-looping.
+# 3000 is also Forgejo/Gitea's default port - walk forward to the next free one instead of crash-looping.
 while ss -tln 2>/dev/null | grep -q ":$WEB_PORT "; do
     WEB_PORT=$((WEB_PORT + 1))
 done
