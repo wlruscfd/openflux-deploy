@@ -21,18 +21,23 @@ log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-apt_sources_without_security() {
+apt_sources_without_ubuntu() {
     local fallback file
     fallback="$(mktemp)"
     for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
         [ -f "$file" ] || continue
-        awk '!/security[.]ubuntu[.]com/ { print }' "$file" >> "$fallback"
+        awk '!/security[.]ubuntu[.]com|old-releases[.]ubuntu[.]com/ { print }' "$file" >> "$fallback"
     done
     for file in /etc/apt/sources.list.d/*.sources; do
         [ -f "$file" ] || continue
-        awk 'BEGIN { RS=""; ORS="\n\n" } $0 !~ /security[.]ubuntu[.]com/ { print }' "$file" >> "$fallback"
+        awk 'BEGIN { RS=""; ORS="\n\n" } $0 !~ /security[.]ubuntu[.]com|old-releases[.]ubuntu[.]com/ { print }' "$file" >> "$fallback"
     done
     printf '%s\n' "$fallback"
+}
+
+apt_drop_stale_ubuntu_lists() {
+    rm -f /var/lib/apt/lists/*security.ubuntu.com* \
+        /var/lib/apt/lists/*old-releases.ubuntu.com* 2>/dev/null || true
 }
 
 apt_update_with_fallback() {
@@ -40,18 +45,33 @@ apt_update_with_fallback() {
     if apt-get update -y; then
         return 0
     fi
-    warn "apt update failed; retrying without Ubuntu security repositories"
-    fallback="$(apt_sources_without_security)"
+    warn "apt update failed; retrying without unavailable Ubuntu repositories"
+    fallback="$(apt_sources_without_ubuntu)"
     if apt-get update -y \
         -o "Dir::Etc::sourcelist=$fallback" \
         -o "Dir::Etc::sourceparts=-" \
         -o "APT::Get::List-Cleanup=0"; then
+        apt_drop_stale_ubuntu_lists
         rm -f "$fallback"
         return 0
     fi
+    apt_drop_stale_ubuntu_lists
     rm -f "$fallback"
-    warn "apt update still failed; continuing with cached package indexes"
+    warn "apt update still failed; retrying with cached package indexes only"
+    apt-get update -y \
+        -o "Dir::Etc::sourcelist=/dev/null" \
+        -o "Dir::Etc::sourceparts=-" \
+        -o "APT::Get::List-Cleanup=0" >/dev/null 2>&1 || warn "apt cache refresh failed; using existing package indexes"
     return 0
+}
+
+apt_install_with_fallback() {
+    if apt-get install -y "$@"; then
+        return 0
+    fi
+    warn "apt install failed; retrying without downloading packages"
+    apt-get install -y --no-download "$@" ||
+        die "apt package installation failed: $*"
 }
 
 trap 'printf "ERROR: install.sh failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
@@ -249,10 +269,10 @@ if [ "$OS_FAMILY" = "debian" ]; then
     apt_update_with_fallback
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
-        apt-get install -y git curl postgresql postgresql-contrib openssl unzip
+        apt_install_with_fallback git curl postgresql postgresql-contrib openssl unzip
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
-        apt-get install -y git curl postgresql postgresql-contrib nginx snapd openssl unzip
+        apt_install_with_fallback git curl postgresql postgresql-contrib nginx snapd openssl unzip
     fi
 else
     if [ "$TLS_MODE" = "http" ]; then
