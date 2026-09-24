@@ -21,6 +21,39 @@ log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+apt_sources_without_security() {
+    local fallback file
+    fallback="$(mktemp)"
+    for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+        [ -f "$file" ] || continue
+        awk '!/security[.]ubuntu[.]com/ { print }' "$file" >> "$fallback"
+    done
+    for file in /etc/apt/sources.list.d/*.sources; do
+        [ -f "$file" ] || continue
+        awk 'BEGIN { RS=""; ORS="\n\n" } $0 !~ /security[.]ubuntu[.]com/ { print }' "$file" >> "$fallback"
+    done
+    printf '%s\n' "$fallback"
+}
+
+apt_update_with_fallback() {
+    local fallback
+    if apt-get update -y; then
+        return 0
+    fi
+    warn "apt update failed; retrying without Ubuntu security repositories"
+    fallback="$(apt_sources_without_security)"
+    if apt-get update -y \
+        -o "Dir::Etc::sourcelist=$fallback" \
+        -o "Dir::Etc::sourceparts=-" \
+        -o "APT::Get::List-Cleanup=0"; then
+        rm -f "$fallback"
+        return 0
+    fi
+    rm -f "$fallback"
+    warn "apt update still failed; continuing with cached package indexes"
+    return 0
+}
+
 trap 'printf "ERROR: install.sh failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 [ "$(id -u)" -eq 0 ] || die "Run this as root (sudo bash install.sh)."
@@ -213,7 +246,7 @@ fi
 
 if [ "$OS_FAMILY" = "debian" ]; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
+    apt_update_with_fallback
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
         apt-get install -y git curl postgresql postgresql-contrib openssl unzip
