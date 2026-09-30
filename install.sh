@@ -257,11 +257,6 @@ if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
     ask NODE_NAME "First node's name" "node-1"
     ask NODE_MAX_KEYS "First node's max keys (999999 = no real limit)" "999999"
     ask RUN_NODE_HERE "Also run this exit node on this same server? (y/n)" "y"
-    if [ "$RUN_NODE_HERE" = "y" ] || [ "$RUN_NODE_HERE" = "Y" ]; then
-        DEFAULT_HEADLESS_CAPTCHA="n"
-        [ "$(read_existing_env NODEAGENT_CAPTCHA_SOLVE_MODE "$NODEAGENT_ENV_FILE")" = "headless_browser" ] && DEFAULT_HEADLESS_CAPTCHA="y"
-        ask ENABLE_HEADLESS_CAPTCHA "Also try a headless browser to auto-solve any Yandex CAPTCHA that still gets through? Installs Chromium (~150-200MB extra RAM only while actually solving one, idle otherwise) (y/n)" "$DEFAULT_HEADLESS_CAPTCHA"
-    fi
 fi
 
 if [ "$OS_FAMILY" = "debian" ]; then
@@ -285,27 +280,6 @@ else
         systemctl enable --now snapd.socket
         ln -sf /var/lib/snapd/snap /snap
     fi
-fi
-
-if [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "y" ] || [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "Y" ]; then
-    log "Installing a headless-capable Chrome (unattended CAPTCHA-solving for the exit node - non-fatal if it fails)"
-    # Google Chrome's own .deb, not apt's "chromium" (a snap stub on modern Ubuntu) - snap confinement wants a real per-user home dir and a systemd user session, neither of which a headless service account like $SYSTEM_USER has.
-    if [ "$OS_FAMILY" = "debian" ]; then
-        command -v gpg >/dev/null 2>&1 || apt-get install -y gnupg >/dev/null 2>&1 || true
-        if command -v gpg >/dev/null 2>&1; then
-            install -d -m 0755 /usr/share/keyrings
-            if curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg 2>/dev/null; then
-                echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-                apt-get update -y || rm -f /etc/apt/sources.list.d/google-chrome.list
-            fi
-        fi
-        apt-get install -y google-chrome-stable || apt-get install -y chromium || apt-get install -y chromium-browser || warn "Headless Chrome install failed - the exit node will still work, just without automatic CAPTCHA solving."
-    else
-        dnf install -y google-chrome-stable || { dnf install -y epel-release 2>/dev/null; dnf install -y chromium; } || warn "Headless Chrome install failed - the exit node will still work, just without automatic CAPTCHA solving."
-    fi
-    # Recent Ubuntu kernels block unprivileged user namespaces via AppArmor by default, which makes a sandboxed browser fail with "cannot change profile for the next exec call" even under --no-sandbox. Key may not exist on other distros/kernels - failing here must not be fatal.
-    echo 'kernel.apparmor_restrict_unprivileged_userns=0' > /etc/sysctl.d/60-openflux-chromium.conf 2>/dev/null
-    sysctl --system >/dev/null 2>&1 || true
 fi
 
 if [ "$TLS_MODE" != "http" ] && [ "${RESERVE_PORT_80:-n}" != "y" ] && [ "${RESERVE_PORT_80:-n}" != "Y" ]; then
@@ -843,11 +817,7 @@ if { [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; } && [ 
     # Auto-recovered like CONTROLPLANE_PORT, so tuning this once (env var or by hand in the file) survives a redeploy.
     NODE_PORT_RANGE_SIZE="${NODE_PORT_RANGE_SIZE:-$(read_existing_env NODEAGENT_PORT_RANGE_SIZE "$NODEAGENT_ENV_FILE")}"
     NODE_PORT_RANGE_SIZE="${NODE_PORT_RANGE_SIZE:-96}"
-    if [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "y" ] || [ "${ENABLE_HEADLESS_CAPTCHA:-n}" = "Y" ]; then
-        NODE_CAPTCHA_SOLVE_MODE="headless_browser"
-    else
-        NODE_CAPTCHA_SOLVE_MODE="off"
-    fi
+    NODE_CAPTCHA_SOLVE_MODE="off"
     cat > "$NODEAGENT_ENV_FILE" <<EOF
 NODEAGENT_CONTROL_URL=http://127.0.0.1:$CONTROLPLANE_PORT
 NODEAGENT_TOKEN=$NODE_TOKEN
