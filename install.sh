@@ -285,11 +285,18 @@ fi
 if [ "$TLS_MODE" != "http" ] && [ "${RESERVE_PORT_80:-n}" != "y" ] && [ "${RESERVE_PORT_80:-n}" != "Y" ]; then
     # Distro-packaged certbot is too old for IP-address certs (needs 5.3+) - certbot's own snap stays current.
     log "Installing certbot via snap"
+    # Freshly-installed snapd re-execs into the bundled core/snapd snap on its first command,
+    # printing "Waiting for automatic snapd restart..." while it does - on a host where that
+    # restart can't actually complete (containerized VPS without working systemd, or no route
+    # to the snap store), this hangs forever instead of failing, holding the SSH session open
+    # with no output until something else (a NAT/firewall idle timeout, the VPS itself) kills
+    # the connection out from under it. Bounding each step lets the existing self-signed-cert
+    # fallback below kick in instead.
     if command -v snap >/dev/null 2>&1 &&
-        snap wait system seed.loaded 2>/dev/null &&
-        { snap install core >/dev/null 2>&1 || true; } &&
-        { snap refresh core >/dev/null 2>&1 || true; } &&
-        snap install --classic certbot; then
+        timeout 120 snap wait system seed.loaded 2>/dev/null &&
+        { timeout 60 snap install core >/dev/null 2>&1 || true; } &&
+        { timeout 60 snap refresh core >/dev/null 2>&1 || true; } &&
+        timeout 120 snap install --classic certbot; then
         ln -sf /snap/bin/certbot /usr/bin/certbot
     else
         warn "Could not install certbot via snap (snap may not be usable on this host)."
