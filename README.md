@@ -8,6 +8,38 @@ A fork of [p1neappleXpress/OpenFlux](https://github.com/p1neappleXpress/OpenFlux
 systemd service, Nginx, and an HTTPS certificate (Let's Encrypt) with auto-renewal — on a fresh
 Debian/Ubuntu or AlmaLinux/RHEL-family VPS.
 
+## Easy install - one command, no questions
+
+On a fresh VPS (Debian/Ubuntu or AlmaLinux), as root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wlruscfd/openflux-deploy/main/easy-install.sh | sudo bash
+```
+
+It detects the server's IP, picks free ports, creates swap when memory is short, generates the
+tokens, installs everything (Postgres, Nginx, controlplane, an exit node on the same server) and at
+the end **verifies the services are actually running**, then prints the panel address, the admin
+token and a "what next" checklist. The full installation log is kept in
+`/var/log/openflux-install.log` (mode `600`). If it stops partway, running it again is safe - no data
+is lost.
+
+Want something different? Override variables: `DOMAIN=panel.example.com LE_EMAIL=you@example.com
+TLS_MODE=domain` (a domain instead of an IP), `NODE_NAME=...`, `WEB_PANEL=y`, `OPENFLUX_LANG=en`
+(English messages). The interactive version is below.
+
+## Uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wlruscfd/openflux-deploy/main/uninstall.sh | sudo bash
+```
+
+Removes everything `install.sh` set up: the services, `/opt/openflux`, `/etc/openflux`, the Postgres
+database and role, the Nginx config, the Let's Encrypt certificate, the system user and the node's
+iptables rules. You have to type `DELETE` first (or run with `CONFIRM=yes`), and a database dump plus
+the env files are saved to `/root/openflux-uninstall-<timestamp>/` (disable with `NO_BACKUP=y`).
+Postgres, Nginx, snapd, git and other packages are left alone - other services may rely on them; Go in
+`/usr/local/go` is removed only with `REMOVE_GO=y`.
+
 ## Usage
 
 Run it **directly on the target VPS**, as root:

@@ -8,6 +8,37 @@
 HTTPS-сертификат (Let's Encrypt) с автопродлением — на чистом Debian/Ubuntu или
 AlmaLinux/RHEL-совместимом VPS.
 
+## Установка «для чайников» — одна команда, без вопросов
+
+На чистом VPS (Debian/Ubuntu или AlmaLinux), от root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wlruscfd/openflux-deploy/main/easy-install.sh | sudo bash
+```
+
+Скрипт сам определяет IP сервера, подбирает свободные порты, при нехватке памяти создаёт swap,
+генерирует токены, ставит всё (Postgres, Nginx, controlplane, exit-ноду на этом же сервере) и в
+конце **проверяет, что сервисы реально запустились**, и выводит адрес панели, токен админа и список
+шагов «что дальше». Подробный лог всей установки — в `/var/log/openflux-install.log` (права `600`).
+Если установка прервалась, её можно безопасно запустить заново — данные не потеряются.
+
+Нужно другое? Переопределите переменные: `DOMAIN=panel.example.com LE_EMAIL=you@example.com
+TLS_MODE=domain` (домен вместо IP), `NODE_NAME=...`, `WEB_PANEL=y`, `OPENFLUX_LANG=en` (английские
+сообщения). Версия с вопросами — ниже.
+
+## Полное удаление
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wlruscfd/openflux-deploy/main/uninstall.sh | sudo bash
+```
+
+Удаляет всё, что поставил `install.sh`: сервисы, `/opt/openflux`, `/etc/openflux`, базу и роль
+Postgres, конфиг Nginx, сертификат Let's Encrypt, системного пользователя и iptables-правила ноды.
+Перед удалением нужно ввести `DELETE` (или запустить с `CONFIRM=yes`), а дамп базы и env-файлы
+сохраняются в `/root/openflux-uninstall-<дата>/` (отключить: `NO_BACKUP=y`). Postgres, Nginx, snapd,
+git и другие пакеты не трогаются — они могут быть нужны другим сервисам; Go из `/usr/local/go`
+удаляется только с `REMOVE_GO=y`.
+
 ## Использование
 
 Запустите его **прямо на целевом VPS**, от root:

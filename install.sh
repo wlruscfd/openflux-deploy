@@ -20,6 +20,7 @@ DEFAULT_REPO_URL="https://github.com/wlruscfd/openflux-server.git"
 log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+random_hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
 apt_sources_without_ubuntu() {
     local fallback file
@@ -243,14 +244,14 @@ fi
 
 ask_secret ADMIN_TOKEN "Admin panel token"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(read_existing_env CONTROLPLANE_ADMIN_TOKEN)"
-[ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(openssl rand -hex 32)"
+[ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(random_hex 32)"
 
 ask_secret DB_PASSWORD "Postgres password for the openflux role"
-[ -n "$DB_PASSWORD" ] || DB_PASSWORD="$(openssl rand -hex 24)"
+[ -n "$DB_PASSWORD" ] || DB_PASSWORD="$(random_hex 24)"
 
 # Internal hashing salt, not user-facing - must come from the existing install if there is one (see read_existing_env).
 TOKEN_PEPPER="$(read_existing_env CONTROLPLANE_TOKEN_PEPPER)"
-[ -n "$TOKEN_PEPPER" ] || TOKEN_PEPPER="$(openssl rand -hex 32)"
+[ -n "$TOKEN_PEPPER" ] || TOKEN_PEPPER="$(random_hex 32)"
 
 ask REGISTER_NODE "Register a first exit node now? (y/n)" "y"
 if [ "$REGISTER_NODE" = "y" ] || [ "$REGISTER_NODE" = "Y" ]; then
