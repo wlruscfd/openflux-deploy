@@ -351,7 +351,9 @@ mkdir -p "$BIN_DIR"
 
 if [ "${RUN_NODE_HERE:-n}" = "y" ] || [ "${RUN_NODE_HERE:-n}" = "Y" ]; then
     log "Building the exit-node binary"
-    ( cd "$SRC_DIR" && go build -o "$BIN_DIR/universal-bypass-tool" . )
+    NODE_PKG="."
+    [ -d "$SRC_DIR/cmd/openflux-node" ] && NODE_PKG="./cmd/openflux-node"
+    ( cd "$SRC_DIR" && go build -o "$BIN_DIR/universal-bypass-tool" "$NODE_PKG" )
 fi
 
 # Optional: controlplane always serves its own embedded panel at /admin/ regardless (see admin.html).
