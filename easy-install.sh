@@ -161,6 +161,9 @@ say "  2. Откройте адрес панели в браузере. Если
 say "  3. Вставьте токен админа, создайте ключ и импортируйте его в приложение OpenFlux (QR-код или ссылка)." "  3. Paste the admin token, create a key and import it into the OpenFlux app (QR code or link)."
 echo
 say "Лог установки: $LOG_FILE" "Installation log: $LOG_FILE"
+if [ "$RUN_NODE_HERE" = "y" ]; then
+    say "Что делает exit-нода (капча, куки, подключение к документу): journalctl -u openflux-nodeagent -f" "What the exit node is doing (captcha, cookies, provider connection): journalctl -u openflux-nodeagent -f"
+fi
 say "Удалить всё:    curl -fsSL $RAW_BASE/uninstall.sh | sudo bash" "Remove everything:    curl -fsSL $RAW_BASE/uninstall.sh | sudo bash"
 if [ "$REGISTER_NODE" = "y" ] && [ -z "$node_token" ]; then
     echo

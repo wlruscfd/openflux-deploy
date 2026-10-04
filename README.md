@@ -124,6 +124,24 @@ This is exactly what the [openflux-app](https://github.com/wlruscfd/openflux-app
 callers that don't pre-set `WEB_PANEL` get the embedded panel - the script does not prompt where
 stdin isn't interactive.
 
+## Troubleshooting: the key connects but no traffic comes back
+
+The exit node reports what its transport is doing in the journal, no `--debug` needed:
+
+```bash
+journalctl -u openflux-nodeagent -f
+```
+
+- `worker started` / `transport connected` - the node reached the provider's document; if traffic is
+  still one-way, look at the exit side (firewall, `iptables`, provider blocking raw packets).
+- `the provider asked for a captcha; waiting for a cookie jar` - the node's IP is being challenged.
+  Push cookies from the app (profile editor -> "Send cookies"), then look for
+  `applying the uploaded cookie jar`. If the captcha line keeps coming back after that, the provider is
+  rejecting the jar for this server's IP - typical for datacenter ranges the provider has flagged; try a
+  different VPS/IP or another transport (`mailru`, `mts`).
+- `attempt N failed (...)` - the reason code and cause of each failed attempt (once a minute per reason).
+- a line a minute: how many keys run and which are not connected to their provider yet.
+
 ## What it sets up
 
 - `openflux` system user, `/opt/openflux/{bin,server,web}`, `/etc/openflux/controlplane.env` (mode
