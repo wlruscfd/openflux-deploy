@@ -2,7 +2,7 @@
 # OpenFlux control-plane auto-deployer - run as root on the target VPS: curl -fsSL .../install.sh -o install.sh && sudo bash install.sh
 set -Eeuo pipefail
 
-GO_VERSION="1.26.5"
+GO_VERSION="1.26.6"
 INSTALL_ROOT="/opt/openflux"
 BIN_DIR="$INSTALL_ROOT/bin"
 SRC_DIR="$INSTALL_ROOT/server"
