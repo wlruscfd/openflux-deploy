@@ -25,7 +25,10 @@ detect_public_ip() {
     local ip svc
     for svc in https://ifconfig.me https://icanhazip.com https://api.ipify.org https://ipinfo.io/ip; do
         ip="$(curl -fsS --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')" || true
-        [ -n "$ip" ] && { printf '%s' "$ip"; return; }
+        if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" =~ ^[0-9a-fA-F:]+:[0-9a-fA-F:]+$ ]]; then
+            printf '%s' "$ip"
+            return
+        fi
     done
     ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || true
 }
@@ -45,9 +48,10 @@ fi
 total_memory_mb="$(awk '/^MemTotal:/ {m=$2} /^SwapTotal:/ {s=$2} END {print int((m+s)/1024)}' /proc/meminfo)"
 if [ "$total_memory_mb" -lt "$MIN_MEMORY_MB" ]; then
     warn "$(say "Памяти (с учётом swap) всего ${total_memory_mb} МБ - сборка на Go на таком сервере может молча упасть по OOM. Создаю swap 2 ГБ." "Only ${total_memory_mb} MB of memory (including swap) - the Go build can be silently OOM-killed on a server this small. Creating a 2 GB swap file.")"
-    if [ ! -e "$SWAP_FILE" ] &&
+    if [ -e "$SWAP_FILE" ] && swapon "$SWAP_FILE" 2>/dev/null ||
+        { [ ! -e "$SWAP_FILE" ] &&
         { fallocate -l 2G "$SWAP_FILE" 2>/dev/null || dd if=/dev/zero of="$SWAP_FILE" bs=1M count=2048 status=none; } &&
-        chmod 600 "$SWAP_FILE" && mkswap "$SWAP_FILE" >/dev/null && swapon "$SWAP_FILE"; then
+        chmod 600 "$SWAP_FILE" && mkswap "$SWAP_FILE" >/dev/null && swapon "$SWAP_FILE"; }; then
         grep -q "^$SWAP_FILE " /etc/fstab || printf '%s none swap sw 0 0\n' "$SWAP_FILE" >> /etc/fstab
     else
         warn "$(say 'Не удалось создать swap (контейнерный VPS?) - продолжаю без него.' 'Could not create swap (a containerized VPS?) - continuing without it.')"
@@ -57,7 +61,7 @@ fi
 : "${TLS_MODE:=ip}"
 : "${REPO_URL:=https://github.com/wlruscfd/openflux-server.git}"
 : "${GIT_REF:=main}"
-: "${WEB_PANEL:=n}"
+: "${WEB_PANEL:=y}"
 : "${REGISTER_NODE:=y}"
 : "${NODE_NAME:=node-1}"
 : "${NODE_MAX_KEYS:=999999}"
@@ -95,6 +99,7 @@ head -n1 "$installer" | grep -q '^#!/bin/bash' ||
 say "Устанавливаю OpenFlux. Это займёт 5-15 минут, подробный лог: $LOG_FILE" "Installing OpenFlux. This takes 5-15 minutes, full log: $LOG_FILE"
 install -m 600 /dev/null "$LOG_FILE"
 
+export OPENFLUX_NONINTERACTIVE=1
 export TLS_MODE REPO_URL GIT_REF WEB_PANEL REGISTER_NODE NODE_NAME NODE_MAX_KEYS RUN_NODE_HERE
 export HTTPS_PORT RESERVE_PORT_80 ADMIN_TOKEN DB_PASSWORD
 [ -n "${SERVER_IP:-}" ] && export SERVER_IP

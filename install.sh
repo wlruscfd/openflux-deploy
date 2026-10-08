@@ -114,12 +114,14 @@ trap on_exit EXIT
 # deploy) has no controlling terminal at all, so every open of /dev/tty below would otherwise still
 # pay a real wait (however it manifests on a given sshd/OS) before ask() falls back to its default,
 # once per question left unset by the caller.
-if exec 3<>/dev/tty 2>/dev/null; then
+if [ -z "${OPENFLUX_NONINTERACTIVE:-}" ] && { : </dev/tty; } 2>/dev/null; then
     HAVE_TTY=1
-    exec 3<&- 3>&-
 else
     HAVE_TTY=0
 fi
+
+export HOME="${HOME:-/root}"
+export GOPROXY="${GOPROXY:-https://proxy.golang.org|https://goproxy.cn|direct}"
 
 if command -v apt-get >/dev/null 2>&1; then
     OS_FAMILY="debian"
@@ -133,14 +135,18 @@ SWAP_FILE="/swapfile-openflux"
 TOTAL_MEMORY_MB="$(awk '/^MemTotal:/ {m=$2} /^SwapTotal:/ {s=$2} END {print int((m+s)/1024)}' /proc/meminfo)"
 if [ "${TOTAL_MEMORY_MB:-0}" -lt 2000 ]; then
     warn "Only ${TOTAL_MEMORY_MB} MB of memory (with swap): creating a 2 GB swap file so the builds do not get OOM-killed."
-    if [ ! -e "$SWAP_FILE" ] &&
+    if [ -e "$SWAP_FILE" ] && swapon "$SWAP_FILE" 2>/dev/null ||
+        { [ ! -e "$SWAP_FILE" ] &&
         { fallocate -l 2G "$SWAP_FILE" 2>/dev/null || dd if=/dev/zero of="$SWAP_FILE" bs=1M count=2048 status=none; } &&
-        chmod 600 "$SWAP_FILE" && mkswap "$SWAP_FILE" >/dev/null && swapon "$SWAP_FILE"; then
+        chmod 600 "$SWAP_FILE" && mkswap "$SWAP_FILE" >/dev/null && swapon "$SWAP_FILE"; }; then
         grep -q "^$SWAP_FILE " /etc/fstab || printf '%s none swap sw 0 0\n' "$SWAP_FILE" >> /etc/fstab
     else
         warn "Could not create swap (a containerized VPS?): continuing without it."
     fi
 fi
+
+# runuser ships with util-linux; a minimal Debian image has no sudo, which made every Postgres step fail with "command not found".
+as_postgres() { ( cd / && runuser -u postgres -- "$@" ); }
 
 # Lets a redeploy reuse a value from a previous run (e.g. CONTROLPLANE_TOKEN_PEPPER) instead of generating a fresh one blind.
 read_existing_env() {
@@ -155,8 +161,8 @@ if [ -f "$ENV_FILE" ]; then
     log "Existing install detected - backing up to $BACKUP_DIR before redeploying"
     mkdir -p "$BACKUP_DIR"
     if command -v pg_dump >/dev/null 2>&1 &&
-        sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='openflux'" 2>/dev/null | grep -q 1; then
-        sudo -u postgres pg_dump openflux > "$BACKUP_DIR/openflux.sql" ||
+        as_postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='openflux'" 2>/dev/null | grep -q 1; then
+        as_postgres pg_dump openflux > "$BACKUP_DIR/openflux.sql" ||
             warn "Database backup failed - continuing with the redeploy anyway."
     else
         warn "Postgres not found yet - nothing to back up despite $ENV_FILE existing."
@@ -169,7 +175,10 @@ detect_public_ip() {
     local ip svc
     for svc in https://ifconfig.me https://icanhazip.com https://api.ipify.org https://ipinfo.io/ip; do
         ip="$(curl -fsS --max-time 5 "$svc" 2>/dev/null | tr -d '[:space:]')" || true
-        [ -n "$ip" ] && { printf '%s' "$ip"; return; }
+        if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" =~ ^[0-9a-fA-F:]+:[0-9a-fA-F:]+$ ]]; then
+            printf '%s' "$ip"
+            return
+        fi
     done
     ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || true
 }
@@ -290,22 +299,6 @@ fi
 
 ask WEB_PANEL "Install the SvelteKit web panel (Bun)? (y/n)" "y"
 
-# AlmaLinux/RHEL-family ships firewalld active by default (Debian/Ubuntu doesn't) - without this it'd still block everything.
-if [ "$OS_FAMILY" = "rhel" ] && command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-    log "Opening the needed port(s) in firewalld"
-    if [ "$TLS_MODE" = "http" ]; then
-        case "${WEB_PANEL:-n}" in
-            y|Y) firewall-cmd --permanent --add-port=3000/tcp ;;
-            *)   firewall-cmd --permanent --add-port="$CONTROLPLANE_PORT/tcp" ;;
-        esac
-    elif [ "${RESERVE_PORT_80:-n}" = "y" ] || [ "${RESERVE_PORT_80:-n}" = "Y" ]; then
-        firewall-cmd --permanent --add-port="$HTTPS_PORT/tcp"
-    else
-        firewall-cmd --permanent --add-service=http --add-port="$HTTPS_PORT/tcp"
-    fi
-    firewall-cmd --reload
-fi
-
 ask_secret ADMIN_TOKEN "Admin panel token"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(read_existing_env CONTROLPLANE_ADMIN_TOKEN)"
 [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(random_hex 32)"
@@ -329,19 +322,19 @@ if [ "$OS_FAMILY" = "debian" ]; then
     apt_update_with_fallback
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
-        apt_install_with_fallback git curl postgresql postgresql-contrib openssl unzip
+        apt_install_with_fallback git curl ca-certificates iptables iproute2 tar gzip postgresql postgresql-contrib openssl unzip
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
-        apt_install_with_fallback git curl postgresql postgresql-contrib nginx snapd openssl unzip
+        apt_install_with_fallback git curl ca-certificates iptables iproute2 tar gzip postgresql postgresql-contrib nginx snapd openssl unzip
     fi
 else
     if [ "$TLS_MODE" = "http" ]; then
         log "Installing packages (git, postgresql)"
-        dnf install -y git curl postgresql-server postgresql postgresql-contrib openssl iptables-nft unzip
+        dnf install -y git curl ca-certificates iproute tar gzip postgresql-server postgresql postgresql-contrib openssl iptables-nft unzip
     else
         log "Installing packages (git, postgresql, nginx, snapd)"
         dnf install -y epel-release
-        dnf install -y git curl postgresql-server postgresql postgresql-contrib nginx snapd openssl iptables-nft unzip policycoreutils-python-utils
+        dnf install -y git curl ca-certificates iproute tar gzip postgresql-server postgresql postgresql-contrib nginx snapd openssl iptables-nft unzip policycoreutils-python-utils
         systemctl enable --now snapd.socket
         ln -sf /var/lib/snapd/snap /snap
     fi
@@ -369,31 +362,34 @@ if [ "$TLS_MODE" != "http" ] && [ "${RESERVE_PORT_80:-n}" != "y" ] && [ "${RESER
     fi
 fi
 
-log "Installing Go $GO_VERSION (apt's Go is usually too old for this project)"
-if ! command -v /usr/local/go/bin/go >/dev/null 2>&1 || \
-   ! /usr/local/go/bin/go version | grep -q "go$GO_VERSION"; then
-    if command -v dpkg >/dev/null 2>&1; then
-        ARCH="$(dpkg --print-architecture)"
-    else
-        case "$(uname -m)" in
-            x86_64) ARCH=amd64 ;;
-            aarch64) ARCH=arm64 ;;
-            *) ARCH="$(uname -m)" ;;
+install_go() {
+    log "Installing Go $GO_VERSION (apt's Go is usually too old for this project)"
+    if ! command -v /usr/local/go/bin/go >/dev/null 2>&1 || \
+       ! /usr/local/go/bin/go version | grep -q "go$GO_VERSION "; then
+        if command -v dpkg >/dev/null 2>&1; then
+            ARCH="$(dpkg --print-architecture)"
+        else
+            case "$(uname -m)" in
+                x86_64) ARCH=amd64 ;;
+                aarch64) ARCH=arm64 ;;
+                *) ARCH="$(uname -m)" ;;
+            esac
+        fi
+        case "$ARCH" in
+            amd64) GOARCH=amd64 ;;
+            arm64) GOARCH=arm64 ;;
+            *) die "Unsupported architecture: $ARCH" ;;
         esac
+        TARBALL="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+        curl -fsSL "https://go.dev/dl/$TARBALL" -o "/tmp/$TARBALL" ||
+            curl -fsSL "https://dl.google.com/go/$TARBALL" -o "/tmp/$TARBALL" ||
+            die "Could not download Go from go.dev or dl.google.com - both blocked on this network? Download $TARBALL from another machine and place it at /tmp/$TARBALL, then re-run."
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf "/tmp/$TARBALL"
+        rm -f "/tmp/$TARBALL"
     fi
-    case "$ARCH" in
-        amd64) GOARCH=amd64 ;;
-        arm64) GOARCH=arm64 ;;
-        *) die "Unsupported architecture: $ARCH" ;;
-    esac
-    TARBALL="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
-    curl -fsSL "https://go.dev/dl/$TARBALL" -o "/tmp/$TARBALL" ||
-        curl -fsSL "https://dl.google.com/go/$TARBALL" -o "/tmp/$TARBALL" ||
-        die "Could not download Go from go.dev or dl.google.com - both blocked on this network? Download $TARBALL from another machine and place it at /tmp/$TARBALL, then re-run."
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf "/tmp/$TARBALL"
-    rm -f "/tmp/$TARBALL"
-fi
+}
+install_go
 export PATH="/usr/local/go/bin:$PATH"
 
 log "Fetching openflux-server ($GIT_REF)"
@@ -401,12 +397,21 @@ log "Fetching openflux-server ($GIT_REF)"
 git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$SRC_DIR" ||
     git config --global --add safe.directory "$SRC_DIR"
 if [ -d "$SRC_DIR/.git" ]; then
+    git -C "$SRC_DIR" remote set-url origin "$REPO_URL"
     git -C "$SRC_DIR" fetch --depth 1 origin "$GIT_REF"
-    git -C "$SRC_DIR" checkout "$GIT_REF"
-    git -C "$SRC_DIR" reset --hard "origin/$GIT_REF"
+    git -C "$SRC_DIR" reset --hard FETCH_HEAD
+    git -C "$SRC_DIR" clean -fdq
 else
     mkdir -p "$INSTALL_ROOT"
     git clone --branch "$GIT_REF" --depth 1 "$REPO_URL" "$SRC_DIR"
+fi
+
+REQUIRED_GO="$(for gomod in "$SRC_DIR/go.mod" "$SRC_DIR/controlplane/go.mod"; do awk '/^go [0-9]/ {print $2; exit}' "$gomod" 2>/dev/null || true; done | sort -V | tail -n1)"
+INSTALLED_GO="$(/usr/local/go/bin/go env GOVERSION 2>/dev/null | sed 's/^go//')"
+if [ -n "$REQUIRED_GO" ] && [ "$(printf '%s\n%s\n' "$REQUIRED_GO" "${INSTALLED_GO:-0}" | sort -V | tail -n1)" != "${INSTALLED_GO:-0}" ]; then
+    log "The repository needs Go $REQUIRED_GO (installed: ${INSTALLED_GO:-none}) - installing it"
+    GO_VERSION="$REQUIRED_GO"
+    install_go
 fi
 
 log "Building controlplane"
@@ -508,13 +513,13 @@ if [ "$OS_FAMILY" = "rhel" ]; then
 fi
 DB_NAME="openflux"
 DB_USER="openflux"
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
-    sudo -u postgres psql -c "CREATE ROLE $DB_USER LOGIN PASSWORD '$DB_PASSWORD';"
+if ! as_postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
+    as_postgres psql -c "CREATE ROLE $DB_USER LOGIN PASSWORD '$DB_PASSWORD';"
 else
-    sudo -u postgres psql -c "ALTER ROLE $DB_USER WITH PASSWORD '$DB_PASSWORD';"
+    as_postgres psql -c "ALTER ROLE $DB_USER WITH PASSWORD '$DB_PASSWORD';"
 fi
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1; then
-    sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
+if ! as_postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1; then
+    as_postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
 fi
 
 DATABASE_URL="postgres://$DB_USER:$DB_PASSWORD@127.0.0.1:5432/$DB_NAME?sslmode=disable"
@@ -551,6 +556,33 @@ else
         CONTROLPLANE_PUBLIC_URL="https://$SERVER_NAME:$HTTPS_PORT"
     fi
 fi
+open_port() {
+    local port="$1"
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+        firewall-cmd --permanent --add-port="$port/tcp" >/dev/null || true
+    fi
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; then
+        ufw allow "$port/tcp" >/dev/null || true
+    fi
+}
+
+log "Opening the needed ports in the server's own firewall (the cloud firewall is yours to open)"
+if [ "$TLS_MODE" = "http" ]; then
+    if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
+        open_port "$WEB_PORT"
+    else
+        open_port "$CONTROLPLANE_PORT"
+    fi
+else
+    open_port "$HTTPS_PORT"
+    if [ "${RESERVE_PORT_80:-n}" != "y" ] && [ "${RESERVE_PORT_80:-n}" != "Y" ]; then
+        open_port 80
+    fi
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --reload >/dev/null || true
+fi
+
 cat > "$ENV_FILE" <<EOF
 CONTROLPLANE_DATABASE_URL=$DATABASE_URL
 CONTROLPLANE_TOKEN_PEPPER=$TOKEN_PEPPER
@@ -913,6 +945,8 @@ Wants=openflux-controlplane.service
 [Service]
 Type=simple
 EnvironmentFile=/etc/openflux/nodeagent.env
+ExecStartPre=/bin/sh -c 'iptables -C OUTPUT -p tcp --tcp-flags RST RST -m mark ! --mark 0x2547 -j DROP 2>/dev/null || iptables -A OUTPUT -p tcp --tcp-flags RST RST -m mark ! --mark 0x2547 -j DROP'
+ExecStartPre=/bin/sh -c 'iptables -C OUTPUT -p icmp --icmp-type port-unreachable -j DROP 2>/dev/null || iptables -A OUTPUT -p icmp --icmp-type port-unreachable -j DROP'
 ExecStart=/opt/openflux/bin/universal-bypass-tool --exit-node --managed --control-url ${NODEAGENT_CONTROL_URL} --node-token ${NODEAGENT_TOKEN} --port-range-size ${NODEAGENT_PORT_RANGE_SIZE} --captcha-solve-mode ${NODEAGENT_CAPTCHA_SOLVE_MODE}
 Restart=on-failure
 RestartSec=2
@@ -955,7 +989,7 @@ SUMMARY
 
 if [ "$TLS_MODE" = "http" ]; then
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
-        HTTP_PORT="3000"
+        HTTP_PORT="$WEB_PORT"
     else
         HTTP_PORT="$CONTROLPLANE_PORT"
     fi

@@ -19,6 +19,7 @@ REMOVE_GO="${REMOVE_GO:-n}"
 say() {
     if [ "$OPENFLUX_LANG" = "en" ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi
 }
+as_postgres() { ( cd / && runuser -u postgres -- "$@" ); }
 step() { printf '\n==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -75,8 +76,8 @@ if [ "$NO_BACKUP" != "y" ]; then
     step "$(say "Сохраняю дамп базы и env-файл в $BACKUP_DIR" "Saving a database dump and env file to $BACKUP_DIR")"
     mkdir -p "$BACKUP_DIR" && chmod 700 "$BACKUP_DIR"
     if command -v pg_dump >/dev/null 2>&1 &&
-        sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null | grep -q 1; then
-        if ! sudo -u postgres pg_dump "$DB_NAME" > "$BACKUP_DIR/openflux.sql"; then
+        as_postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null | grep -q 1; then
+        if ! as_postgres pg_dump "$DB_NAME" > "$BACKUP_DIR/openflux.sql"; then
             die "$(say 'Не удалось сделать дамп базы - ничего не удалено. Повторите с NO_BACKUP=y, если дамп не нужен.' 'The database dump failed - nothing was removed. Re-run with NO_BACKUP=y if you do not need one.')"
         fi
     else
@@ -119,11 +120,11 @@ rmdir /var/www/certbot 2>/dev/null || true
 
 step "$(say 'Удаляю базу и роль Postgres' 'Dropping the Postgres database and role')"
 if command -v psql >/dev/null 2>&1 && systemctl is-active --quiet postgresql 2>/dev/null; then
-    sudo -u postgres psql -c "DROP DATABASE IF EXISTS $DB_NAME WITH (FORCE);" >/dev/null 2>&1 ||
-        { sudo -u postgres psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" >/dev/null 2>&1;
-          sudo -u postgres psql -c "DROP DATABASE IF EXISTS $DB_NAME;" ||
+    as_postgres psql -c "DROP DATABASE IF EXISTS $DB_NAME WITH (FORCE);" >/dev/null 2>&1 ||
+        { as_postgres psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" >/dev/null 2>&1;
+          as_postgres psql -c "DROP DATABASE IF EXISTS $DB_NAME;" ||
               warn "$(say 'Не удалось удалить базу.' 'Could not drop the database.')"; }
-    sudo -u postgres psql -c "DROP ROLE IF EXISTS $DB_USER;" ||
+    as_postgres psql -c "DROP ROLE IF EXISTS $DB_USER;" ||
         warn "$(say 'Не удалось удалить роль.' 'Could not drop the role.')"
 else
     warn "$(say 'Postgres не запущен - базу и роль удалите вручную, если они остались.' 'Postgres is not running - drop the database and role by hand if they remain.')"
