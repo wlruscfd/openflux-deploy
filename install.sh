@@ -98,6 +98,19 @@ else
     die "This script only supports Debian/Ubuntu (apt-get) or AlmaLinux/RHEL-family (dnf) right now."
 fi
 
+SWAP_FILE="/swapfile-openflux"
+TOTAL_MEMORY_MB="$(awk '/^MemTotal:/ {m=$2} /^SwapTotal:/ {s=$2} END {print int((m+s)/1024)}' /proc/meminfo)"
+if [ "${TOTAL_MEMORY_MB:-0}" -lt 2000 ]; then
+    warn "Only ${TOTAL_MEMORY_MB} MB of memory (with swap): creating a 2 GB swap file so the builds do not get OOM-killed."
+    if [ ! -e "$SWAP_FILE" ] &&
+        { fallocate -l 2G "$SWAP_FILE" 2>/dev/null || dd if=/dev/zero of="$SWAP_FILE" bs=1M count=2048 status=none; } &&
+        chmod 600 "$SWAP_FILE" && mkswap "$SWAP_FILE" >/dev/null && swapon "$SWAP_FILE"; then
+        grep -q "^$SWAP_FILE " /etc/fstab || printf '%s none swap sw 0 0\n' "$SWAP_FILE" >> /etc/fstab
+    else
+        warn "Could not create swap (a containerized VPS?): continuing without it."
+    fi
+fi
+
 # Lets a redeploy reuse a value from a previous run (e.g. CONTROLPLANE_TOKEN_PEPPER) instead of generating a fresh one blind.
 read_existing_env() {
     local var="$1" file="${2:-$ENV_FILE}"
@@ -391,9 +404,10 @@ if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
     WEB_DIR_NEW="$WEB_DIR.new"
     WEB_DIR_OLD="$WEB_DIR.old"
     rm -rf "$WEB_DIR_NEW"
+    WEB_BUILD_LOG="/tmp/openflux-web-build.log"
     if ( cd "$SRC_DIR/controlplane/web" \
-        && "$WEB_BUN" install \
-        && "$WEB_BUN" run build \
+        && "$WEB_BUN" install >"$WEB_BUILD_LOG" 2>&1 \
+        && "$WEB_BUN" run build >>"$WEB_BUILD_LOG" 2>&1 \
         && mkdir -p "$WEB_DIR_NEW" \
         && cp -a build "$WEB_DIR_NEW/" \
         && cp -a node_modules "$WEB_DIR_NEW/" \
@@ -407,7 +421,8 @@ if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
         rm -rf "$WEB_DIR_OLD"
         log "Web panel built to $WEB_DIR"
     else
-        warn "Web panel build failed - falling back to controlplane's embedded panel."
+        warn "Web panel build failed - falling back to controlplane's embedded panel (the older, simpler one). Last lines of the build:"
+        tail -n 25 "$WEB_BUILD_LOG" >&2 || true
         rm -rf "$WEB_DIR_NEW"
         WEB_PANEL="n"
     fi
