@@ -227,6 +227,26 @@ if [ -z "$CONTROLPLANE_PORT" ]; then
 fi
 CONTROLPLANE_PORT="${CONTROLPLANE_PORT:-8080}"
 
+port_busy() {
+    local port="$1" listeners
+    listeners="$(ss -tln 2>/dev/null | awk '{print $4}' || true)"
+    if grep -qE "[:.]$port$" <<<"$listeners"; then
+        return 0
+    fi
+    (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
+}
+
+# A port held by something other than our own running service would crash-loop the controlplane and look like "it did not start".
+if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    REQUESTED_CONTROLPLANE_PORT="$CONTROLPLANE_PORT"
+    while port_busy "$CONTROLPLANE_PORT"; do
+        CONTROLPLANE_PORT=$((CONTROLPLANE_PORT + 1))
+    done
+    if [ "$CONTROLPLANE_PORT" != "$REQUESTED_CONTROLPLANE_PORT" ]; then
+        warn "Port $REQUESTED_CONTROLPLANE_PORT is already used by another program on this server: the controlplane will use $CONTROLPLANE_PORT instead."
+    fi
+fi
+
 echo
 echo "Before you continue: your VPS/cloud firewall (security group) needs to allow"
 echo "inbound TCP 443 for 'domain'/'ip' mode below (443 is just the default and can be"
@@ -509,9 +529,11 @@ if [ -z "$WEB_PORT" ]; then
 fi
 WEB_PORT="${WEB_PORT:-3000}"
 # 3000 is also Forgejo/Gitea's default port - walk forward to the next free one instead of crash-looping.
-while ss -tln 2>/dev/null | grep -q ":$WEB_PORT "; do
-    WEB_PORT=$((WEB_PORT + 1))
-done
+if ! systemctl is-active --quiet "$WEB_SERVICE_NAME" 2>/dev/null; then
+    while port_busy "$WEB_PORT"; do
+        WEB_PORT=$((WEB_PORT + 1))
+    done
+fi
 if [ "$TLS_MODE" = "http" ]; then
     if [ "${WEB_PANEL:-n}" = "y" ] || [ "${WEB_PANEL:-n}" = "Y" ]; then
         CONTROLPLANE_LISTEN_ADDR="127.0.0.1:$CONTROLPLANE_PORT"
