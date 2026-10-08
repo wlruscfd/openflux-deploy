@@ -17,7 +17,8 @@ WEB_ENV_FILE="/etc/openflux/web.env"
 SYSTEM_USER="openflux"
 DEFAULT_REPO_URL="https://github.com/wlruscfd/openflux-server.git"
 
-log()  { printf '\n==> %s\n' "$*"; }
+CURRENT_STEP="starting"
+log()  { CURRENT_STEP="$*"; printf '\n==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 random_hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
@@ -76,6 +77,36 @@ apt_install_with_fallback() {
 }
 
 trap 'printf "ERROR: install.sh failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
+trap '' HUP
+
+show_diagnostics() {
+    printf '\n---- diagnostics ----\n' >&2
+    free -m >&2 2>/dev/null || true
+    df -h / >&2 2>/dev/null || true
+    if command -v dmesg >/dev/null 2>&1; then
+        dmesg 2>/dev/null | grep -iE "out of memory|killed process" | tail -n 5 >&2 || true
+    fi
+    for unit in "$SERVICE_NAME" "$WEB_SERVICE_NAME" "$NODEAGENT_SERVICE_NAME"; do
+        if systemctl cat "$unit" >/dev/null 2>&1; then
+            printf '\n-- journalctl -u %s (last 25 lines) --\n' "$unit" >&2
+            journalctl -u "$unit" -n 25 --no-pager >&2 2>/dev/null || true
+        fi
+    done
+    printf -- '---- end of diagnostics ----\n' >&2
+}
+
+on_exit() {
+    local code=$?
+    if [ "$code" -ne 0 ]; then
+        printf '\n!! install.sh stopped with exit code %s during: %s\n' "$code" "$CURRENT_STEP" >&2
+        if [ "$code" -eq 137 ] || [ "$code" -eq 143 ]; then
+            printf '!! it was killed from outside - on a small server that is almost always the out-of-memory killer.\n' >&2
+        fi
+        show_diagnostics
+    fi
+}
+trap on_exit EXIT
 
 [ "$(id -u)" -eq 0 ] || die "Run this as root (sudo bash install.sh)."
 
@@ -585,11 +616,11 @@ WEB_SERVICE_TEMPLATE
 fi
 
 log "Waiting for controlplane to come up"
-for _ in $(seq 1 20); do
+for _ in $(seq 1 40); do
     curl -fsS "http://127.0.0.1:$CONTROLPLANE_PORT/healthz" >/dev/null 2>&1 && break
     sleep 1
 done
-curl -fsS "http://127.0.0.1:$CONTROLPLANE_PORT/healthz" >/dev/null 2>&1 || die "controlplane did not start - check: journalctl -u $SERVICE_NAME"
+curl -fsS "http://127.0.0.1:$CONTROLPLANE_PORT/healthz" >/dev/null 2>&1 || die "controlplane did not start on 127.0.0.1:$CONTROLPLANE_PORT within 40 seconds (its log is printed below)"
 
 if [ "$TLS_MODE" != "http" ]; then
 
